@@ -1,0 +1,180 @@
+import crypto from "crypto";
+
+const MIDTRANS_SERVER_KEY = process.env.MIDTRANS_SERVER_KEY || "";
+const IS_PRODUCTION = process.env.MIDTRANS_IS_PRODUCTION === "true";
+
+const SNAP_API_URL = IS_PRODUCTION
+  ? "https://app.midtrans.com/snap/v1/transactions"
+  : "https://app.sandbox.midtrans.com/snap/v1/transactions";
+
+const CORE_API_URL = IS_PRODUCTION
+  ? "https://api.midtrans.com/v2/charge"
+  : "https://api.sandbox.midtrans.com/v2/charge";
+
+export interface CreateOrderParams {
+  orderId: string;
+  grossAmount: number;
+  itemName: string;
+  quantity?: number;
+  customerName?: string;
+}
+
+export interface SnapResponse {
+  token: string;
+  redirectUrl: string;
+  isSimulated: boolean;
+}
+
+export interface QrisChargeResponse {
+  orderId: string;
+  grossAmount: number;
+  qrString: string; // String EMVCo mentah untuk digambar langsung di layar LCD TFT ESP32
+  qrUrl?: string; // URL gambar PNG QR code untuk browser Kiosk
+  transactionId?: string;
+  isSimulated: boolean;
+}
+
+// 1. Pembuatan Sesi Pembayaran Snap (Pop-up Web Iframe Standar)
+export async function createSnapTransaction(params: CreateOrderParams): Promise<SnapResponse> {
+  const { orderId, grossAmount, itemName, quantity = 1, customerName = "Konsumen Kios" } = params;
+
+  // Jika kredensial belum diisi di .env, gunakan mode simulasi sandbox bawaan
+  if (!MIDTRANS_SERVER_KEY || MIDTRANS_SERVER_KEY.trim() === "") {
+    console.log(`[MIDTRANS MOCK SNAP] Menggunakan simulasi lokal untuk order: ${orderId}`);
+    return {
+      token: `MOCK-SNAP-${Date.now()}-${orderId}`,
+      redirectUrl: `/payment/simulate?orderId=${orderId}`,
+      isSimulated: true,
+    };
+  }
+
+  const authHeader = Buffer.from(`${MIDTRANS_SERVER_KEY}:`).toString("base64");
+
+  const payload = {
+    transaction_details: {
+      order_id: orderId,
+      gross_amount: Math.round(grossAmount),
+    },
+    item_details: [
+      {
+        id: "WATER_REFILL",
+        price: Math.round(grossAmount / quantity),
+        quantity,
+        name: itemName,
+      },
+    ],
+    customer_details: {
+      first_name: customerName,
+    },
+    enabled_payments: ["qris", "gopay", "shopeepay", "other_qris"],
+  };
+
+  const response = await fetch(SNAP_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      Authorization: `Basic ${authHeader}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error("[MIDTRANS ERROR RESPONSE]:", errorText);
+    throw new Error(`Midtrans API Error (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json();
+  return {
+    token: data.token,
+    redirectUrl: data.redirect_url,
+    isSimulated: false,
+  };
+}
+
+// 2. Pembuatan Direct QRIS Core API (Tanpa Pop-up, Langsung Menghasilkan qr_string EMVCo untuk LCD TFT)
+export async function createQrisTransaction(params: CreateOrderParams): Promise<QrisChargeResponse> {
+  const { orderId, grossAmount, itemName, quantity = 1 } = params;
+
+  // Jika kredensial belum diisi di .env, gunakan mode simulasi mock lokal
+  if (!MIDTRANS_SERVER_KEY || MIDTRANS_SERVER_KEY.trim() === "") {
+    console.log(`[MIDTRANS MOCK CORE QRIS] Menggunakan simulasi lokal QRIS untuk order: ${orderId}`);
+    return {
+      orderId,
+      grossAmount,
+      qrString: `00020101021226590014ID.LINKAJA.WWW01189360091100200023815204581253033605802ID5911WATERVEND6007JAKARTA61051234062070703A016304${orderId}`,
+      qrUrl: `/payment/simulate?orderId=${orderId}`,
+      isSimulated: true,
+    };
+  }
+
+  const authHeader = Buffer.from(`${MIDTRANS_SERVER_KEY}:`).toString("base64");
+
+  const payload = {
+    payment_type: "qris",
+    transaction_details: {
+      order_id: orderId,
+      gross_amount: Math.round(grossAmount),
+    },
+    item_details: [
+      {
+        id: "WATER_REFILL",
+        price: Math.round(grossAmount / quantity),
+        quantity,
+        name: itemName,
+      },
+    ],
+    qris: {
+      acquirer: "gopay",
+    },
+  };
+
+  const response = await fetch(CORE_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      Authorization: `Basic ${authHeader}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error("[MIDTRANS CORE QRIS ERROR]:", errorText);
+    throw new Error(`Midtrans Core API Error (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json();
+  const qrAction = Array.isArray(data.actions)
+    ? data.actions.find((a: { name: string; url: string }) => a.name === "generate-qr-code")
+    : undefined;
+
+  return {
+    orderId,
+    grossAmount,
+    qrString: data.qr_string || "",
+    qrUrl: qrAction?.url || "",
+    transactionId: data.transaction_id,
+    isSimulated: false,
+  };
+}
+
+// 3. Verifikasi Tanda Tangan Webhook SHA512
+export function verifyMidtransSignature(
+  orderId: string,
+  statusCode: string,
+  grossAmount: string,
+  signatureKey: string
+): boolean {
+  if (!MIDTRANS_SERVER_KEY) {
+    // Mode simulasi lokal selalu valid
+    return true;
+  }
+
+  const payload = `${orderId}${statusCode}${grossAmount}${MIDTRANS_SERVER_KEY}`;
+  const expectedSignature = crypto.createHash("sha512").update(payload).digest("hex");
+
+  return expectedSignature.toLowerCase() === signatureKey.toLowerCase();
+}

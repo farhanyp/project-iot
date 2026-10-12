@@ -15,7 +15,7 @@ console.log(`[WS] WebSocket Server listening on ws://localhost:${WS_PORT}`);
 
 // Cache status perangkat terakhir agar browser baru/refresh langsung tahu status nyata
 let cachedDeviceStatus: "READY" | "DISPENSING" | "OFFLINE" = "OFFLINE";
-let cachedTelemetry: any = null;
+let cachedTelemetry: Record<string, unknown> | null = null;
 let lastDeviceCode = "DISPENSER-01";
 
 const broadcastToClients = (payload: object) => {
@@ -218,6 +218,7 @@ wss.on("connection", (ws) => {
 
             const tx = await prisma.transaction.create({
               data: {
+                orderId: `INV-MANUAL-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
                 deviceId: device.id,
                 volumeMl,
                 amount,
@@ -250,7 +251,7 @@ wss.on("connection", (ws) => {
 
         // Teruskan perintah ke ESP32 melalui MQTT PubSub
         const commandTopic = `water/dispenser/${deviceId}/command`;
-        const commandPayload: Record<string, any> = {
+        const commandPayload: Record<string, unknown> = {
           action,
           volumeMl,
           transactionId,

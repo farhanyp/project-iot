@@ -6,6 +6,11 @@ generator client {
   provider = "prisma-client-js"
 }
 
+enum UserRole {
+  ADMIN
+  OPERATOR
+}
+
 enum DeviceStatus {
   OFFLINE
   READY
@@ -23,12 +28,29 @@ enum TransactionStatus {
   FAILED
 }
 
+enum LogLevel {
+  INFO
+  WARN
+  ERROR
+}
+
+model User {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String   // Hashed password (scrypt/bcrypt)
+  name      String?
+  role      UserRole @default(ADMIN)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model Device {
   id           String        @id @default(uuid())
   code         String        @unique // e.g. "DISPENSER-01"
   name         String
   location     String?
   status       DeviceStatus  @default(READY)
+  isActive     Boolean       @default(true) // Sakelar izin operasional
   pricePerMl   Float         @default(0.01) // Rp 10 / ml = Rp 6.000 / 600ml
   lastPingAt   DateTime?
   createdAt    DateTime      @default(now())
@@ -36,21 +58,41 @@ model Device {
 
   transactions  Transaction[]
   telemetryLogs TelemetryLog[]
+  activityLogs  ActivityLog[]
+}
+
+model PackagePreset {
+  id        String   @id @default(uuid())
+  code      String   @unique // e.g. "CUP_250ML", "BOTTLE_600ML", "GALLON_1500ML"
+  name      String
+  volumeMl  Int
+  price     Float
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions Transaction[]
 }
 
 model Transaction {
-  id            String            @id @default(uuid())
-  deviceId      String
-  device        Device            @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  volumeMl      Int               // Target volume in ml (e.g. 600)
-  amount        Float             // Total price in IDR
-  dispensedMl   Int               @default(0) // Actual dispensed volume
-  status        TransactionStatus @default(PENDING)
-  paymentMethod String            @default("QRIS")
-  startedAt     DateTime?
-  completedAt   DateTime?
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
+  id              String            @id @default(uuid())
+  orderId         String            @unique // e.g. "INV-WATER-1718000000"
+  deviceId        String
+  device          Device            @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  packagePresetId String?
+  packagePreset   PackagePreset?    @relation(fields: [packagePresetId], references: [id], onDelete: SetNull)
+  volumeMl        Int               // Target volume in ml (e.g. 600)
+  amount          Float             // Total price in IDR
+  dispensedMl     Int               @default(0) // Actual dispensed volume
+  status          TransactionStatus @default(PENDING)
+  paymentMethod   String            @default("MIDTRANS_QRIS")
+  snapToken       String?
+  paymentType     String?           // e.g. "qris", "gopay"
+  midtransStatus  String?           // Raw status from Midtrans callback
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
 }
 
 model TelemetryLog {
@@ -59,6 +101,19 @@ model TelemetryLog {
   device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   flowRate    Float    // Liter / minute
   dispensedMl Int      // Real-time dispensed volume (ml)
+  weightGrams Float?   // Load cell weight reading (gram)
+  tareGrams   Float?   // Container tare reading (gram)
   pulseCount  Int?     // Raw flow sensor pulse counter
   createdAt   DateTime @default(now())
+}
+
+model ActivityLog {
+  id        String   @id @default(uuid())
+  level     LogLevel @default(INFO)
+  action    String   // e.g. "AUTH_LOGIN", "PAYMENT_PAID", "PUMP_START", etc.
+  message   String
+  deviceId  String?
+  device    Device?  @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  metadata  Json?
+  createdAt DateTime @default(now())
 }

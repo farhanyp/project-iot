@@ -29,7 +29,7 @@ export interface IoTEvent {
   topic?: string;
   deviceCode?: string;
   eventType?: "status" | "telemetry" | "complete";
-  data?: any;
+  data?: Record<string, unknown> | null;
   timestamp: string;
 }
 
@@ -62,6 +62,7 @@ export function useIoTSocket(customWsUrl?: string) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isMountedRef = useRef(true);
+  const connectRef = useRef<() => void>(() => {});
 
   // Otomatis tentukan URL WebSocket berdasarkan host browser saat ini
   const getResolvedWsUrl = useCallback(() => {
@@ -169,7 +170,7 @@ export function useIoTSocket(customWsUrl?: string) {
         if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = setTimeout(() => {
           if (isMountedRef.current) {
-            connect();
+            connectRef.current();
           }
         }, 2500);
       };
@@ -181,6 +182,10 @@ export function useIoTSocket(customWsUrl?: string) {
       console.warn("Failed to initiate WebSocket connection:", e);
     }
   }, [getResolvedWsUrl]);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -245,10 +250,10 @@ export function useIoTSocket(customWsUrl?: string) {
       }
 
       console.warn("WebSocket is reconnecting, re-initiating connection...");
-      connect();
+      connectRef.current();
       return false;
     },
-    [connect]
+    []
   );
 
   // Helper function untuk Tare timbangan manual
