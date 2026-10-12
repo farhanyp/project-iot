@@ -3,15 +3,30 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "concurrently -k -n \"NEXT,IOT\" -c \"cyan,magenta\" \"next dev\" \"tsx server/iot-bridge.ts\"",
+    "dev:next": "next dev",
+    "bridge": "tsx server/iot-bridge.ts",
+    "start:bridge": "tsx server/iot-bridge.ts",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.2",
+    "concurrently": "^10.0.6",
+    "mqtt": "^5.16.0",
     "next": "16.4.0",
+    "pg": "^8.23.1",
+    "prisma": "^7.10.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "tsx": "^4.23.15",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",

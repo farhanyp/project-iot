@@ -1,0 +1,63 @@
+services:
+  # Eclipse Mosquitto MQTT Message Broker
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mosquitto_broker
+    restart: unless-stopped
+    ports:
+      - "1883:1883"   # Standard MQTT TCP port for ESP32 & Node backend
+      - "9001:9001"   # MQTT over WebSockets
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+
+  # PostgreSQL Database for Prisma ORM
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres_db
+    restart: unless-stopped
+    ports:
+      - "5433:5432"   # Port 5433 on host (avoids conflict with local port 5432)
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: air_minum_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # IoT Gateway / Bridge Service (MQTT <-> WebSocket)
+  iot-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    container_name: iot_bridge
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/air_minum_db?schema=public
+      - MQTT_BROKER_URL=mqtt://mosquitto:1883
+      - WS_PORT=3001
+    depends_on:
+      - mosquitto
+      - postgres
+
+  # Next.js 16 Web Dashboard
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: web_dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_WS_URL=ws://localhost:3001
+    depends_on:
+      - iot-bridge
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
+  postgres_data:

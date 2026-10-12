@@ -1,0 +1,26 @@
+# -------------------------------------------------------------
+# Dockerfile for IoT Gateway / Bridge Service (MQTT <-> WebSocket)
+# -------------------------------------------------------------
+FROM node:20-alpine
+
+WORKDIR /app
+RUN apk add --no-cache libc6-compat
+
+COPY package.json package-lock.json* ./
+COPY prisma ./prisma/
+COPY prisma.config.ts ./
+
+RUN npm ci
+RUN npx prisma generate
+
+COPY lib ./lib/
+COPY server ./server/
+
+ENV NODE_ENV=production
+ENV WS_PORT=3001
+ENV MQTT_BROKER_URL="mqtt://mosquitto:1883"
+ENV DATABASE_URL="postgresql://postgres:postgres@postgres:5432/air_minum_db?schema=public"
+
+EXPOSE 3001
+
+CMD ["npx", "tsx", "server/iot-bridge.ts"]

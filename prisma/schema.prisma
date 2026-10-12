@@ -1,0 +1,64 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum DeviceStatus {
+  OFFLINE
+  READY
+  DISPENSING
+  ERROR
+  MAINTENANCE
+}
+
+enum TransactionStatus {
+  PENDING
+  PAID
+  DISPENSING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+model Device {
+  id           String        @id @default(uuid())
+  code         String        @unique // e.g. "DISPENSER-01"
+  name         String
+  location     String?
+  status       DeviceStatus  @default(READY)
+  pricePerMl   Float         @default(0.01) // Rp 10 / ml = Rp 6.000 / 600ml
+  lastPingAt   DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  transactions  Transaction[]
+  telemetryLogs TelemetryLog[]
+}
+
+model Transaction {
+  id            String            @id @default(uuid())
+  deviceId      String
+  device        Device            @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  volumeMl      Int               // Target volume in ml (e.g. 600)
+  amount        Float             // Total price in IDR
+  dispensedMl   Int               @default(0) // Actual dispensed volume
+  status        TransactionStatus @default(PENDING)
+  paymentMethod String            @default("QRIS")
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+}
+
+model TelemetryLog {
+  id          String   @id @default(uuid())
+  deviceId    String
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  flowRate    Float    // Liter / minute
+  dispensedMl Int      // Real-time dispensed volume (ml)
+  pulseCount  Int?     // Raw flow sensor pulse counter
+  createdAt   DateTime @default(now())
+}
