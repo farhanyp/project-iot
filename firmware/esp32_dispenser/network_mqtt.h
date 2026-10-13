@@ -58,12 +58,31 @@ inline void setupWiFiManager() {
     delay(1000);
   }
 
-  wm.setConfigPortalTimeout(180);
+  // ============================================================================
+  // MODE DEVELOPMENT: Selalu minta hubungkan WiFi & IP baru setiap kali menyala
+  // (Ubah ke false jika kelak sudah selesai development / tahap produksi)
+  // ============================================================================
+  const bool DEV_MODE_ALWAYS_CONFIG_WIFI = true;
 
-  Serial.println("\n[WiFiManager] Mencoba menyambung ke Wi-Fi tersimpan...");
-  showBootScreen("Menghubungkan Wi-Fi...");
+  bool res = false;
+  if (DEV_MODE_ALWAYS_CONFIG_WIFI) {
+    Serial.println("\n[DEV MODE] Menghapus cache WiFi lama & membuka portal konfigurasi...");
+    wm.resetSettings();           // Hapus SSID & Password tersimpan dari WiFiManager
+    WiFi.disconnect(true, true);  // Hapus memori WiFi dari NVS flash ESP32
+    wm.setConfigPortalTimeout(0); // 0 = Tanpa batas waktu (tunggu sampai selesai disetting di HP/Laptop)
 
-  bool res = wm.autoConnect("WaterVend-Setup");
+    showBootScreen("WiFi: WaterVend-Setup\nBuka: 192.168.4.1");
+    Serial.println("[WiFiManager] Hotspot aktif: 'WaterVend-Setup'");
+    Serial.println("[WiFiManager] Silakan sambungkan HP/Laptop ke WiFi 'WaterVend-Setup'");
+    Serial.println("[WiFiManager] Buka browser ke 192.168.4.1 untuk memilih WiFi & memasukkan IP Broker baru.");
+
+    res = wm.startConfigPortal("WaterVend-Setup");
+  } else {
+    wm.setConfigPortalTimeout(180);
+    Serial.println("\n[WiFiManager] Mencoba menyambung ke Wi-Fi tersimpan...");
+    showBootScreen("Menghubungkan Wi-Fi...");
+    res = wm.autoConnect("WaterVend-Setup");
+  }
 
   if (!res) {
     Serial.println("[WiFiManager] Gagal terhubung. Merestart ESP32...");
