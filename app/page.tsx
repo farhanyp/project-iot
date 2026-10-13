@@ -19,6 +19,7 @@ interface PaymentOrder {
   snapToken?: string;
   qrString?: string;
   qrUrl?: string;
+  qrUrlV2?: string;
   paymentMode?: string;
   isSimulated: boolean;
 }
@@ -164,6 +165,7 @@ export default function Home() {
         snapToken: data.snapToken,
         qrString: data.qrString,
         qrUrl: data.qrUrl,
+        qrUrlV2: data.qrUrlV2,
         paymentMode: data.paymentMode,
         isSimulated: data.isSimulated,
       });
@@ -521,6 +523,85 @@ export default function Home() {
                   ? "Mode Pengujian: Klik tombol di bawah untuk simulasi bayar instan"
                   : "Silakan scan kode QRIS menggunakan e-wallet atau m-banking Anda"}
               </span>
+            </div>
+
+            {/* Helper Khusus Midtrans Sandbox Simulator */}
+            <div className="space-y-2 text-left bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs">
+              <span className="font-bold text-slate-800 block text-xs">
+                🧪 Pengujian Simulator Midtrans:
+              </span>
+
+              {/* Opsi QRIS v2 (Rekomendasi Utama) */}
+              {paymentOrder.qrUrlV2 && (
+                <div className="bg-white p-2 rounded-lg border border-slate-200 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-emerald-700 text-[11px]">QRIS v2 (OpenAPI / MPM)</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (paymentOrder.qrUrlV2) {
+                          navigator.clipboard.writeText(paymentOrder.qrUrlV2);
+                          showFeedback("✓ URL QRIS v2 disalin! Tempelkan di Simulator v2");
+                        }
+                      }}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-medium px-2 py-0.5 rounded cursor-pointer transition-colors"
+                    >
+                      📋 Salin URL v2
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-500 line-clamp-1 font-mono break-all select-all">
+                    {paymentOrder.qrUrlV2}
+                  </p>
+                  <div className="pt-1 border-t border-slate-100 flex justify-end">
+                    <a
+                      href="https://simulator.sandbox.midtrans.com/v2/qris/index"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-emerald-700 font-semibold hover:underline inline-flex items-center gap-1"
+                    >
+                      Buka Simulator QRIS v2 ↗
+                    </a>
+                  </div>
+                </div>
+              )}
+
+              {/* Opsi QRIS v1 Standar */}
+              {paymentOrder.qrUrl && (
+                <div className="bg-white p-2 rounded-lg border border-slate-200 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-blue-700 text-[11px]">QRIS v1 (Standar)</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (paymentOrder.qrUrl) {
+                          navigator.clipboard.writeText(paymentOrder.qrUrl);
+                          showFeedback("✓ URL QRIS v1 disalin! Tempelkan di Simulator v1");
+                        }
+                      }}
+                      className="bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-medium px-2 py-0.5 rounded cursor-pointer transition-colors"
+                    >
+                      📋 Salin URL v1
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-500 line-clamp-1 font-mono break-all select-all">
+                    {paymentOrder.qrUrl}
+                  </p>
+                  <div className="pt-1 border-t border-slate-100 flex justify-end">
+                    <a
+                      href="https://simulator.sandbox.midtrans.com/qris/index"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-blue-700 font-semibold hover:underline inline-flex items-center gap-1"
+                    >
+                      Buka Simulator QRIS v1 ↗
+                    </a>
+                  </div>
+                </div>
+              )}
+
+              <p className="text-[10px] text-slate-400 italic">
+                *Catatan: Simulator Midtrans membaca URL Gambar. Masukkan PIN simulasi 123456 jika diminta.
+              </p>
             </div>
 
             {/* Tombol Simulasi Bayar Instan */}

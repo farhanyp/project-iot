@@ -3,6 +3,13 @@ import { prisma } from "@/lib/prisma";
 import { verifyMidtransSignature } from "@/lib/midtrans";
 import { sendMqttCommand } from "@/lib/mqtt-sender";
 
+export async function GET() {
+  return NextResponse.json({
+    status: "OK",
+    message: "Midtrans notification webhook endpoint is ready.",
+  });
+}
+
 export async function POST(req: NextRequest) {
   try {
     const payload = await req.json();
@@ -36,8 +43,12 @@ export async function POST(req: NextRequest) {
     });
 
     if (!transaction) {
-      console.warn(`[MIDTRANS WEBHOOK] Transaksi tidak ditemukan di DB: ${orderId}`);
-      return NextResponse.json({ error: "Transaction not found" }, { status: 404 });
+      console.warn(`[MIDTRANS WEBHOOK] Transaksi tidak ditemukan di DB: ${orderId} (kemungkinan probe/tes dari Midtrans Dashboard)`);
+      // Kembalikan status 200 agar fitur Test di Dashboard Midtrans sukses
+      return NextResponse.json({
+        status: "OK",
+        message: `Order ${orderId} tidak ada di database lokal (diabaikan sebagai tes/probe).`,
+      });
     }
 
     // 3. Evaluasi Status Pembayaran

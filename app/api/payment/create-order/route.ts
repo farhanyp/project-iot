@@ -60,6 +60,7 @@ export async function POST(req: NextRequest) {
     let snapToken: string | null = null;
     let qrString = "";
     let qrUrl = "";
+    let qrUrlV2 = "";
     let redirectUrl = "";
     let isSimulated = false;
 
@@ -72,6 +73,7 @@ export async function POST(req: NextRequest) {
       });
       qrString = qris.qrString;
       qrUrl = qris.qrUrl || "";
+      qrUrlV2 = qris.qrUrlV2 || "";
       isSimulated = qris.isSimulated;
 
       // Broadcast string QRIS langsung ke ESP32 LCD TFT melalui MQTT (non-blocking)
@@ -121,6 +123,7 @@ export async function POST(req: NextRequest) {
       paymentMode: PAYMENT_QRIS_MODE,
       qrString,
       qrUrl,
+      qrUrlV2,
       snapToken,
       redirectUrl,
       isSimulated,

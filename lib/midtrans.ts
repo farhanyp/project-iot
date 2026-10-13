@@ -1,6 +1,6 @@
 import crypto from "crypto";
 
-const MIDTRANS_SERVER_KEY = process.env.MIDTRANS_SERVER_KEY || "";
+const MIDTRANS_SERVER_KEY = (process.env.MIDTRANS_SERVER_KEY || "").trim();
 const IS_PRODUCTION = process.env.MIDTRANS_IS_PRODUCTION === "true";
 
 const SNAP_API_URL = IS_PRODUCTION
@@ -29,7 +29,8 @@ export interface QrisChargeResponse {
   orderId: string;
   grossAmount: number;
   qrString: string; // String EMVCo mentah untuk digambar langsung di layar LCD TFT ESP32
-  qrUrl?: string; // URL gambar PNG QR code untuk browser Kiosk
+  qrUrl?: string; // URL gambar PNG QR code v1 (untuk simulator v1)
+  qrUrlV2?: string; // URL gambar PNG QR code v2 (untuk simulator v2)
   transactionId?: string;
   isSimulated: boolean;
 }
@@ -126,7 +127,7 @@ export async function createQrisTransaction(params: CreateOrderParams): Promise<
       },
     ],
     qris: {
-      acquirer: "gopay",
+      acquirer: process.env.MIDTRANS_QRIS_ACQUIRER || "airpay shopee",
     },
   };
 
@@ -147,15 +148,20 @@ export async function createQrisTransaction(params: CreateOrderParams): Promise<
   }
 
   const data = await response.json();
-  const qrAction = Array.isArray(data.actions)
+  const qrActionV1 = Array.isArray(data.actions)
     ? data.actions.find((a: { name: string; url: string }) => a.name === "generate-qr-code")
+    : undefined;
+
+  const qrActionV2 = Array.isArray(data.actions)
+    ? data.actions.find((a: { name: string; url: string }) => a.name === "generate-qr-code-v2")
     : undefined;
 
   return {
     orderId,
     grossAmount,
     qrString: data.qr_string || "",
-    qrUrl: qrAction?.url || "",
+    qrUrl: qrActionV1?.url || "",
+    qrUrlV2: qrActionV2?.url || "",
     transactionId: data.transaction_id,
     isSimulated: false,
   };

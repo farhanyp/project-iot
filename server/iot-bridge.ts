@@ -17,6 +17,7 @@ console.log(`[WS] WebSocket Server listening on ws://localhost:${WS_PORT}`);
 let cachedDeviceStatus: "READY" | "DISPENSING" | "OFFLINE" = "OFFLINE";
 let cachedTelemetry: Record<string, unknown> | null = null;
 let lastDeviceCode = "DISPENSER-01";
+let simulationTimer: NodeJS.Timeout | null = null;
 
 const broadcastToClients = (payload: object) => {
   const messageStr = JSON.stringify(payload);
@@ -38,11 +39,12 @@ const mqttClient = mqtt.connect(BROKER_URL, {
 mqttClient.on("connect", () => {
   console.log(`[MQTT] Connected successfully to Mosquitto Broker!`);
 
-  // Subscribe ke topik telemetri dan status perangkat dispenser
+  // Subscribe ke topik telemetri, status, dan perintah perangkat dispenser
   const topics = [
     "water/dispenser/+/status",
     "water/dispenser/+/telemetry",
     "water/dispenser/+/complete",
+    "water/dispenser/+/command",
   ];
 
   mqttClient.subscribe(topics, (err) => {
@@ -97,6 +99,11 @@ mqttClient.on("message", async (topic, message) => {
         };
       }
     } else if (eventType === "telemetry") {
+      if (simulationTimer) {
+        // Hardware ESP32 fisik aktif dan mengirim telemetri nyata, matikan simulasi virtual
+        clearInterval(simulationTimer);
+        simulationTimer = null;
+      }
       if (payload.status === "DISPENSING") {
         cachedDeviceStatus = "DISPENSING";
       } else if (payload.status === "READY") {
@@ -107,11 +114,154 @@ mqttClient.on("message", async (topic, message) => {
         ...payload,
       };
     } else if (eventType === "complete") {
+      if (simulationTimer) {
+        clearInterval(simulationTimer);
+        simulationTimer = null;
+      }
       cachedDeviceStatus = "READY";
       if (cachedTelemetry) {
         cachedTelemetry.dispensedMl = payload.dispensedMl || cachedTelemetry.dispensedMl;
         cachedTelemetry.weightGrams = payload.weightGrams || cachedTelemetry.weightGrams;
         cachedTelemetry.status = "COMPLETED";
+      }
+    } else if (eventType === "command") {
+      console.log(`[MQTT COMMAND for ${deviceCode}]:`, payload);
+      if (payload.action === "START") {
+        const targetMl = Number(payload.volumeMl) || 600;
+        const txId = payload.transactionId;
+        const orderId = payload.orderId;
+
+        cachedDeviceStatus = "DISPENSING";
+        cachedTelemetry = {
+          ...(cachedTelemetry || {}),
+          status: "DISPENSING",
+          targetMl,
+          dispensedMl: 0,
+          weightGrams: 0,
+          flowRate: 1.25,
+        };
+
+        // Broadcast status DISPENSING instan ke WebSocket client
+        broadcastToClients({
+          type: "MQTT_EVENT",
+          topic: `water/dispenser/${deviceCode}/status`,
+          deviceCode,
+          eventType: "status",
+          data: { status: "DISPENSING", targetMl, message: "Pompa menyala, mulai pengisian air" },
+          timestamp: new Date().toISOString(),
+        });
+
+        // Update status perangkat di DB menjadi DISPENSING
+        prisma.device.updateMany({
+          where: { code: deviceCode },
+          data: { status: "DISPENSING" },
+        }).catch((e) => console.warn("[DB Device Update Warn]:", e.message));
+
+        // Jika transaksi ada di DB, set ke DISPENSING
+        if (txId || orderId) {
+          prisma.transaction.updateMany({
+            where: {
+              OR: [
+                ...(txId ? [{ id: txId }] : []),
+                ...(orderId ? [{ orderId }] : []),
+              ],
+            },
+            data: { status: "DISPENSING" },
+          }).catch((e) => console.warn("[DB TX Update Warn]:", e.message));
+        }
+
+        // Simulasi aliran air virtual otomatis jika ESP32 fisik belum terhubung
+        if (simulationTimer) clearInterval(simulationTimer);
+        let currentMl = 0;
+        simulationTimer = setInterval(async () => {
+          currentMl += 25; // Bertambah 25 mL per 200ms
+          if (currentMl > targetMl) currentMl = targetMl;
+
+          cachedTelemetry = {
+            ...(cachedTelemetry || {}),
+            status: "DISPENSING",
+            targetMl,
+            dispensedMl: currentMl,
+            weightGrams: currentMl,
+            flowRate: 1.25,
+          };
+
+          broadcastToClients({
+            type: "MQTT_EVENT",
+            topic: `water/dispenser/${deviceCode}/telemetry`,
+            deviceCode,
+            eventType: "telemetry",
+            data: {
+              status: "DISPENSING",
+              targetMl,
+              dispensedMl: currentMl,
+              weightGrams: currentMl,
+              flowRate: 1.25,
+            },
+            timestamp: new Date().toISOString(),
+          });
+
+          // Begitu target tercapai, cut-off pompa otomatis!
+          if (currentMl >= targetMl) {
+            if (simulationTimer) clearInterval(simulationTimer);
+            simulationTimer = null;
+            cachedDeviceStatus = "READY";
+            cachedTelemetry = {
+              ...(cachedTelemetry || {}),
+              status: "COMPLETED",
+              dispensedMl: targetMl,
+              weightGrams: targetMl,
+              flowRate: 0,
+            };
+
+            broadcastToClients({
+              type: "MQTT_EVENT",
+              topic: `water/dispenser/${deviceCode}/complete`,
+              deviceCode,
+              eventType: "complete",
+              data: {
+                status: "COMPLETED",
+                dispensedMl: targetMl,
+                weightGrams: targetMl,
+                flowRate: 0,
+                message: "Target volume tercapai, pompa dimatikan otomatis.",
+              },
+              timestamp: new Date().toISOString(),
+            });
+
+            // Update status transaksi di database ke COMPLETED
+            try {
+              if (txId || orderId) {
+                await prisma.transaction.updateMany({
+                  where: {
+                    OR: [
+                      ...(txId ? [{ id: txId }] : []),
+                      ...(orderId ? [{ orderId }] : []),
+                    ],
+                  },
+                  data: {
+                    status: "COMPLETED",
+                    dispensedMl: targetMl,
+                    completedAt: new Date(),
+                  },
+                });
+              }
+              await prisma.device.updateMany({
+                where: { code: deviceCode },
+                data: { status: "READY" },
+              });
+              console.log(`[PUMP AUTO CUT-OFF] Pengisian ${targetMl} mL selesai untuk ${orderId || txId || deviceCode}`);
+            } catch (err) {
+              console.warn("[DB Complete Error]:", (err as Error).message);
+            }
+          }
+        }, 200);
+      } else if (payload.action === "STOP" || payload.action === "RESET") {
+        if (simulationTimer) {
+          clearInterval(simulationTimer);
+          simulationTimer = null;
+        }
+        cachedDeviceStatus = "READY";
       }
     }
 
@@ -231,7 +381,16 @@ wss.on("connection", (ws) => {
           } catch (txErr) {
             console.warn("[DB TX WARNING]:", (txErr as Error).message);
           }
-        } else if (action === "RESET") {
+        }
+
+        if (action === "STOP" || action === "RESET") {
+          if (simulationTimer) {
+            clearInterval(simulationTimer);
+            simulationTimer = null;
+          }
+        }
+
+        if (action === "RESET") {
           cachedDeviceStatus = "READY";
           if (cachedTelemetry) {
             cachedTelemetry.dispensedMl = 0;
