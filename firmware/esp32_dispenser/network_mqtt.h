@@ -2,13 +2,14 @@
 #include "config.h"
 #include "display_ui.h"
 #include "pump_control.h"
-#include "scale_sensor.h"
+#include "flow_calculator.h"
 
 // ==============================================================================
 // MODUL JARINGAN WIFI & PROTOKOL MQTT IOT
+// (Mendukung Dynamic Packages, 6-Stage Flow, dan Kalibrasi Aliran Pompa)
 // ==============================================================================
 
-// Helper untuk mengekstrak nilai string dari payload JSON sederhana tanpa library berat
+// Helper untuk mengekstrak nilai string dari payload JSON sederhana
 inline String extractJsonValue(const String& json, const String& key) {
   int keyIndex = json.indexOf("\"" + key + "\"");
   if (keyIndex < 0) return "";
@@ -37,14 +38,49 @@ inline String extractJsonValue(const String& json, const String& key) {
   return "";
 }
 
+// Helper untuk memparsing daftar paket dari database web
+inline void parsePackagesFromJson(const String& json) {
+  int searchPos = 0;
+  int count = 0;
+
+  while (count < MAX_PACKAGES) {
+    int nameIdx = json.indexOf("\"name\"", searchPos);
+    if (nameIdx < 0) break;
+
+    int volIdx = json.indexOf("\"volumeMl\"", searchPos);
+    int priceIdx = json.indexOf("\"price\"", searchPos);
+    int idIdx = json.indexOf("\"id\"", searchPos);
+
+    String nameVal = extractJsonValue(json.substring(nameIdx - 1), "name");
+    String volVal = extractJsonValue(json.substring(volIdx - 1), "volumeMl");
+    String priceVal = extractJsonValue(json.substring(priceIdx - 1), "price");
+    String idVal = (idIdx >= 0) ? extractJsonValue(json.substring(idIdx - 1), "id") : String(count);
+
+    if (nameVal.length() > 0 && volVal.length() > 0 && priceVal.length() > 0) {
+      strncpy(dispenserPackages[count].id, idVal.c_str(), sizeof(dispenserPackages[count].id) - 1);
+      strncpy(dispenserPackages[count].name, nameVal.c_str(), sizeof(dispenserPackages[count].name) - 1);
+      dispenserPackages[count].volumeMl = volVal.toInt();
+      dispenserPackages[count].price = priceVal.toInt();
+      count++;
+    }
+
+    searchPos = nameIdx + 8;
+  }
+
+  if (count > 0) {
+    totalPackages = count;
+    Serial.printf("[PACKAGES] Berhasil memuat %d paket dari backend web!\n", totalPackages);
+    if (currentScreen == SCREEN_STANDBY) {
+      showStandbyScreen();
+    }
+  }
+}
+
 // Inisialisasi WiFiManager dengan Captive Portal
 inline void setupWiFiManager() {
   preferences.begin("watervend", false);
   String savedBroker = preferences.getString("mqtt_broker", "192.168.1.4");
   savedBroker.toCharArray(mqtt_broker, 40);
-
-  calibrationFactor   = preferences.getFloat("cal_factor", -420.0);
-  maxWeightLimitGrams = preferences.getFloat("max_weight", 2500.0);
   preferences.end();
 
   WiFiManager wm;
@@ -53,40 +89,24 @@ inline void setupWiFiManager() {
 
   if (digitalRead(PIN_TRIGGER_RESET_WIFI) == LOW) {
     Serial.println("\n[RESET] Tombol BOOT terdeteksi! Menghapus data Wi-Fi tersimpan...");
-    showBootScreen("Reset WiFi Diaktifkan...");
+    showBootWifiScreen("", "", "Reset WiFi Diaktifkan...");
     wm.resetSettings();
     delay(1000);
   }
 
-  // ============================================================================
-  // MODE DEVELOPMENT: Selalu minta hubungkan WiFi & IP baru setiap kali menyala
-  // (Ubah ke false jika kelak sudah selesai development / tahap produksi)
-  // ============================================================================
-  const bool DEV_MODE_ALWAYS_CONFIG_WIFI = true;
+  // Tampilkan UI Boot WiFi
+  showBootWifiScreen("", "", "Menghubungkan Wi-Fi...");
+  wm.setConfigPortalTimeout(180);
+  bool res = wm.autoConnect("WaterVend-Setup");
 
-  bool res = false;
-  if (DEV_MODE_ALWAYS_CONFIG_WIFI) {
-    Serial.println("\n[DEV MODE] Menghapus cache WiFi lama & membuka portal konfigurasi...");
-    wm.resetSettings();           // Hapus SSID & Password tersimpan dari WiFiManager
-    WiFi.disconnect(true, true);  // Hapus memori WiFi dari NVS flash ESP32
-    wm.setConfigPortalTimeout(0); // 0 = Tanpa batas waktu (tunggu sampai selesai disetting di HP/Laptop)
-
-    showBootScreen("WiFi: WaterVend-Setup\nBuka: 192.168.4.1");
-    Serial.println("[WiFiManager] Hotspot aktif: 'WaterVend-Setup'");
-    Serial.println("[WiFiManager] Silakan sambungkan HP/Laptop ke WiFi 'WaterVend-Setup'");
-    Serial.println("[WiFiManager] Buka browser ke 192.168.4.1 untuk memilih WiFi & memasukkan IP Broker baru.");
-
+  if (!res) {
+    Serial.println("[WiFiManager] Gagal terhubung. Membuka hotspot konfigurasi...");
+    showBootWifiScreen("WaterVend-Setup", "192.168.4.1", "Mode Hotspot Setup");
     res = wm.startConfigPortal("WaterVend-Setup");
-  } else {
-    wm.setConfigPortalTimeout(180);
-    Serial.println("\n[WiFiManager] Mencoba menyambung ke Wi-Fi tersimpan...");
-    showBootScreen("Menghubungkan Wi-Fi...");
-    res = wm.autoConnect("WaterVend-Setup");
   }
 
   if (!res) {
-    Serial.println("[WiFiManager] Gagal terhubung. Merestart ESP32...");
-    showBootScreen("Gagal WiFi, Restart...");
+    Serial.println("[WiFiManager] Gagal setup. Merestart ESP32...");
     delay(2000);
     ESP.restart();
   }
@@ -104,167 +124,177 @@ inline void setupWiFiManager() {
   Serial.println(WiFi.SSID());
   Serial.print("[Wi-Fi] IP ESP32: ");
   Serial.println(WiFi.localIP());
-  Serial.printf("[MQTT] Target Broker: %s:%d\n", mqtt_broker, MQTT_PORT);
+
+  // Tampilkan ringkasan status Wi-Fi terkoneksi
+  showBootWifiScreen(WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), "Terhubung [OK]");
+  delay(1200);
 }
 
-// Handler Callback Perintah MQTT dari Backend / Dashboard Web
+// Handler Callback Perintah MQTT dari Backend Web
 inline void mqttCallback(char* topic, byte* message, unsigned int length) {
   String messageStr = "";
   for (unsigned int i = 0; i < length; i++) {
     messageStr += (char)message[i];
   }
-  Serial.print("\n[MQTT Command Diterima]: ");
-  Serial.println(messageStr);
+  Serial.printf("\n[MQTT Diterima] Topik: %s | Data: %s\n", topic, messageStr.c_str());
+
+  String topicStr = String(topic);
+
+  // Penerimaan paket dinamis dari database web
+  if (topicStr.endsWith("/packages") || messageStr.indexOf("\"packages\"") >= 0) {
+    parsePackagesFromJson(messageStr);
+    return;
+  }
 
   String action = extractJsonValue(messageStr, "action");
 
-  // Perintah 1: START
-  if (action == "START") {
+  // Perintah 1: PAYMENT_SUCCESS -> Pembayaran lunas, instruksikan letakkan tumbler!
+  if (action == "PAYMENT_SUCCESS") {
+    String volStr = extractJsonValue(messageStr, "volumeMl");
+    targetMilliLitres = (volStr.length() > 0) ? volStr.toInt() : 600;
+    currentTransactionId = extractJsonValue(messageStr, "orderId");
+    if (currentTransactionId.length() == 0) {
+      currentTransactionId = extractJsonValue(messageStr, "transactionId");
+    }
+
+    Serial.printf("[ALUR] Pembayaran Lunas! Menampilkan instruksi letakkan tumbler (Target: %lu mL)\n", targetMilliLitres);
+    showPlaceTumblerScreen(targetMilliLitres, currentTransactionId.c_str());
+  }
+
+  // Perintah 2: START -> Pemicu pompa air langsung
+  else if (action == "START") {
     String volStr = extractJsonValue(messageStr, "volumeMl");
     targetMilliLitres = (volStr.length() > 0) ? volStr.toInt() : 600;
 
-    String maxWtStr = extractJsonValue(messageStr, "maxWeight");
-    if (maxWtStr.length() > 0) {
-      maxWeightLimitGrams = maxWtStr.toFloat();
-    }
-
     currentTransactionId = extractJsonValue(messageStr, "transactionId");
     if (currentTransactionId.length() == 0) {
-      currentTransactionId = "tx-" + String(millis());
+      currentTransactionId = extractJsonValue(messageStr, "orderId");
     }
 
-    if (scale.is_ready() || scale.wait_ready_timeout(200)) {
-      long raw = scale.read();
-      lastRawAdcReading = raw;
-      if (isAdcReadingValid(raw)) {
-        isScaleReady = true;
-        scale.set_scale(calibrationFactor);
-        long netBefore = raw - scale.get_offset();
-        initialContainerWeight = (float)netBefore / calibrationFactor;
-        if (initialContainerWeight < 0.0) initialContainerWeight = 0.0;
-        scale.tare(3);
-      } else {
-        isScaleReady = false;
-        initialContainerWeight = 0.0;
-      }
-    } else {
-      isScaleReady = false;
-      initialContainerWeight = 0.0;
-    }
-
-    dispensedWeightGrams = 0.0;
+    requiredDispenseDurationMs = calculateDispenseDurationMs(targetMilliLitres);
     dispensedMilliLitres = 0;
     dispenseStartTime = millis();
     isDispensing = true;
 
     startPump();
     showDispensingScreen(targetMilliLitres);
-
-    String topicTelemetry = String("water/dispenser/") + DEVICE_ID + "/telemetry";
-    String payload = String("{\"status\":\"DISPENSING\",\"dispensedMl\":0,\"weightGrams\":0.0,\"grossWeight\":") + 
-                     String(initialContainerWeight, 1) + ",\"targetMl\":" + String(targetMilliLitres) + 
-                     ",\"containerWeight\":" + String(initialContainerWeight, 1) + 
-                     ",\"maxWeightLimit\":" + String(maxWeightLimitGrams, 1) + 
-                     ",\"isScaleReady\":" + (isScaleReady ? "true" : "false") + 
-                     ",\"scaleRaw\":" + String(lastRawAdcReading) + 
-                     ",\"flowRate\":" + String((PUMP_FLOW_RATE_ML_PER_SEC * 60.0) / 1000.0, 2) + 
-                     ",\"cutOffMode\":\"" + (isScaleReady ? "WEIGHT_LOADCELL" : "TIME_FALLBACK") + "\"" + 
-                     ",\"transactionId\":\"" + currentTransactionId + "\"}";
-    mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
   }
 
-  // Perintah 2: STOP
+  // Perintah 3: SHOW_QRIS -> Tampilkan QRIS dengan timer 5 menit
+  else if (action == "SHOW_QRIS" || action == "QR" || topicStr.endsWith("/qr") || messageStr.indexOf("\"qrString\"") >= 0) {
+    String nominal = extractJsonValue(messageStr, "nominal");
+    if (nominal.length() == 0) {
+      String amt = extractJsonValue(messageStr, "amount");
+      if (amt.length() > 0) {
+        long val = amt.toInt();
+        if (val >= 1000) {
+          nominal = String(val / 1000) + "." + ((val % 1000 < 100) ? "0" : "") + ((val % 1000 < 10) ? "0" : "") + String(val % 1000);
+        } else {
+          nominal = amt;
+        }
+      } else {
+        nominal = "6.000";
+      }
+    }
+
+    String qris = extractJsonValue(messageStr, "qris");
+    if (qris.length() == 0) {
+      qris = extractJsonValue(messageStr, "qrString");
+    }
+    if (qris.length() == 0) {
+      qris = "00020101021226600016ID.WATERVEND.WWW520458125303360540660005802ID5913WATERVEND IOT6007BANDUNG6304ABCD";
+    }
+
+    String durStr = extractJsonValue(messageStr, "timeoutSeconds");
+    unsigned long durSec = (durStr.length() > 0) ? durStr.toInt() : 300; // Default 5 menit
+
+    showQRISScreen(nominal.c_str(), qris.c_str(), durSec);
+  }
+
+  // Perintah 4: STOP
   else if (action == "STOP") {
     isDispensing = false;
     stopPump();
-    showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, dispensedWeightGrams, "Tombol Stop Darurat Ditekan");
+    showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Tombol Stop Darurat Ditekan");
 
     String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
     mqttClient.publish(topicStatus.c_str(), "{\"status\":\"READY\",\"message\":\"Emergency Stopped\"}", true);
 
     String topicComplete = String("water/dispenser/") + DEVICE_ID + "/complete";
     String completePayload = String("{\"status\":\"EMERGENCY_STOPPED\",\"dispensedMl\":") + String(dispensedMilliLitres) + 
-                             String(",\"weightGrams\":") + String(dispensedWeightGrams, 1) + 
                              String(",\"transactionId\":\"") + currentTransactionId + "\"}";
     mqttClient.publish(topicComplete.c_str(), completePayload.c_str());
   }
 
-  // Perintah 3: RESET
-  else if (action == "RESET") {
+  // Perintah 5: SHOW_MENU / RESET
+  else if (action == "SHOW_MENU" || action == "RESET") {
     isDispensing = false;
     stopPump();
     dispensedMilliLitres = 0;
-    dispensedWeightGrams = 0.0;
     targetMilliLitres = 0;
-    initialContainerWeight = 0.0;
     currentTransactionId = "";
 
-    if (scale.is_ready() || scale.wait_ready_timeout(200)) {
-      long raw = scale.read();
-      lastRawAdcReading = raw;
-      if (isAdcReadingValid(raw)) {
-        isScaleReady = true;
-        scale.set_scale(calibrationFactor);
-        scale.tare(5);
-        currentLiveWeight = 0.0;
-      }
-    }
-
     showStandbyScreen();
-    String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
-    mqttClient.publish(topicStatus.c_str(), "{\"status\":\"READY\",\"message\":\"Sesi pengisian di-reset\"}", true);
   }
 
-  // Perintah 4: TARE
-  else if (action == "TARE") {
-    if (scale.is_ready() || scale.wait_ready_timeout(500)) {
-      long raw = scale.read();
-      if (isAdcReadingValid(raw)) {
-        scale.set_scale(calibrationFactor);
-        scale.tare(5);
-        currentLiveWeight = 0.0;
+  // Perintah 6: SET_FLOW_RATE -> Konfigurasi manual debit pompa (mL/detik)
+  else if (action == "SET_FLOW_RATE") {
+    String flowStr = extractJsonValue(messageStr, "flowRate");
+    if (flowStr.length() > 0) {
+      float newRate = flowStr.toFloat();
+      savePumpFlowRate(newRate);
+
+      String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
+      String payload = String("{\"status\":\"READY\",\"flowRateMlPerSec\":") + String(pumpFlowRateMlPerSec, 2) + "}";
+      mqttClient.publish(topicStatus.c_str(), payload.c_str(), true);
+    }
+  }
+
+  // Perintah 7: CALIBRATE_PUMP -> Kalibrasi rasio volume aktual dibanding target
+  else if (action == "CALIBRATE_PUMP") {
+    String measuredStr = extractJsonValue(messageStr, "measuredMl");
+    String targetStr = extractJsonValue(messageStr, "targetMl");
+    if (measuredStr.length() > 0 && targetStr.length() > 0) {
+      float measured = measuredStr.toFloat();
+      float target = targetStr.toFloat();
+      if (measured > 0.0f && target > 0.0f) {
+        float adjustedRate = pumpFlowRateMlPerSec * (measured / target);
+        savePumpFlowRate(adjustedRate);
+
         String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
-        mqttClient.publish(topicStatus.c_str(), "{\"status\":\"READY\",\"isScaleReady\":true,\"message\":\"Tare Berhasil\",\"currentWeight\":0.0}", true);
+        String payload = String("{\"status\":\"READY\",\"flowRateMlPerSec\":") + String(pumpFlowRateMlPerSec, 2) + "}";
+        mqttClient.publish(topicStatus.c_str(), payload.c_str(), true);
       }
     }
-  }
-
-  // Perintah 5: SHOW_QRIS
-  else if (action == "SHOW_QRIS") {
-    String nominal = extractJsonValue(messageStr, "nominal");
-    if (nominal.length() == 0) nominal = "6.000";
-    String qris = extractJsonValue(messageStr, "qris");
-    if (qris.length() == 0) {
-      qris = "00020101021226600016ID.WATERVEND.WWW520458125303360540660005802ID5913WATERVEND IOT6007BANDUNG6304ABCD";
-    }
-    showQRISScreen(nominal.c_str(), qris.c_str());
-  }
-
-  // Perintah 6: SHOW_MENU
-  else if (action == "SHOW_MENU") {
-    showStandbyScreen();
   }
 }
 
-// Menghubungkan ulang ke Broker MQTT dengan Last Will and Testament (LWT)
+// Menghubungkan ulang ke Broker MQTT
 inline void reconnectMQTT() {
   while (!mqttClient.connected()) {
     Serial.print("[MQTT] Menghubungkan ke Mosquitto Broker...");
-    showBootScreen("Menghubungkan MQTT...");
+    showBootWifiScreen(WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), "Menghubungkan MQTT...");
+
     String clientId = String("ESP32-") + DEVICE_ID;
     String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
     String topicCommand = String("water/dispenser/") + DEVICE_ID + "/command";
+    String topicQr = String("water/dispenser/") + DEVICE_ID + "/qr";
+    String topicPackages = String("water/dispenser/") + DEVICE_ID + "/packages";
 
     if (mqttClient.connect(clientId.c_str(), topicStatus.c_str(), 1, true, "{\"status\":\"OFFLINE\"}")) {
       Serial.println(" Terhubung!");
 
-      String readyPayload = String("{\"status\":\"READY\",\"isScaleReady\":") + (isScaleReady ? "true" : "false") + 
-                            String(",\"calFactor\":") + String(calibrationFactor, 2) + 
-                            String(",\"maxWeightLimit\":") + String(maxWeightLimitGrams, 1) + "}";
+      String readyPayload = String("{\"status\":\"READY\",\"flowRateMlPerSec\":") + String(pumpFlowRateMlPerSec, 2) + 
+                            String(",\"cutOffMode\":\"CALIBRATED_FLOW_TIMER\"}");
       mqttClient.publish(topicStatus.c_str(), readyPayload.c_str(), true);
-      mqttClient.subscribe(topicCommand.c_str());
-      Serial.printf("[MQTT] Berlangganan topik: %s\n", topicCommand.c_str());
 
+      // Berlangganan topik perintah, qr, dan daftar paket
+      mqttClient.subscribe(topicCommand.c_str());
+      mqttClient.subscribe(topicQr.c_str());
+      mqttClient.subscribe(topicPackages.c_str());
+      Serial.println("[MQTT] Berlangganan ke topik command, qr, dan packages!");
+
+      // Tampilkan layar menu utama (Standby)
       showStandbyScreen();
     } else {
       Serial.printf(" Gagal (rc=%d). Mencoba lagi dalam 4 detik...\n", mqttClient.state());

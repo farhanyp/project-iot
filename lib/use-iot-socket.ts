@@ -205,7 +205,7 @@ export function useIoTSocket(customWsUrl?: string) {
   // Fungsi pengiriman perintah ke ESP32 via WebSocket gateway
   const sendCommand = useCallback(
     (
-      action: "START" | "STOP" | "TARE" | "CALIBRATE" | "SET_CAL_FACTOR" | "SET_MAX_WEIGHT" | "RESET",
+      action: "START" | "STOP" | "TARE" | "CALIBRATE" | "SET_CAL_FACTOR" | "SET_MAX_WEIGHT" | "RESET" | "SHOW_MENU",
       optionsOrVolume?: number | CommandOptions,
       fallbackDeviceId = "DISPENSER-01"
     ) => {

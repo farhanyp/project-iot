@@ -3,11 +3,11 @@
 
 // ==============================================================================
 // MODUL KONTROL POMPA AIR BR314 & RELAY
+// (Single Channel Aktif pada GPIO 5 - Optimal & Bebas Konflik GPIO)
 // ==============================================================================
 
 inline void initPump() {
-  pinMode(PIN_RELAY_PUMP_CH1, INPUT); // Floating OFF saat pertama kali nyala
-  pinMode(PIN_RELAY_SPARE_CH2, INPUT);
+  pinMode(PIN_RELAY_PUMP_CH1, INPUT); // Floating OFF (High-Z) saat pertama kali boot
 }
 
 inline void startPump() {

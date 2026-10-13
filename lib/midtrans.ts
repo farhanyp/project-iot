@@ -184,3 +184,79 @@ export function verifyMidtransSignature(
 
   return expectedSignature.toLowerCase() === signatureKey.toLowerCase();
 }
+
+export interface MidtransStatusResult {
+  statusCode: string;
+  transactionStatus: string;
+  fraudStatus?: string;
+  paymentType?: string;
+  grossAmount?: string;
+  orderId: string;
+  isPaid: boolean;
+  isFailed: boolean;
+  raw?: Record<string, unknown>;
+}
+
+// 4. Pengecekan Status Transaksi Langsung ke Midtrans Core API (Active Polling Fallback)
+export async function checkMidtransStatus(orderId: string): Promise<MidtransStatusResult | null> {
+  if (!MIDTRANS_SERVER_KEY || MIDTRANS_SERVER_KEY.trim() === "") {
+    return null;
+  }
+
+  const baseUrl = IS_PRODUCTION
+    ? "https://api.midtrans.com/v2"
+    : "https://api.sandbox.midtrans.com/v2";
+
+  const authHeader = Buffer.from(`${MIDTRANS_SERVER_KEY}:`).toString("base64");
+
+  try {
+    const res = await fetch(`${baseUrl}/${encodeURIComponent(orderId)}/status`, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Authorization: `Basic ${authHeader}`,
+      },
+      // Jangan gunakan cache agar data status real-time
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      if (res.status === 404) {
+        return null; // Transaksi belum terdaftar di Midtrans
+      }
+      const errText = await res.text();
+      console.warn(`[MIDTRANS STATUS CHECK WARN] (${res.status}): ${errText}`);
+      return null;
+    }
+
+    const data = await res.json();
+    const transactionStatus = String(data.transaction_status || "");
+    const fraudStatus = String(data.fraud_status || "");
+
+    const isPaid =
+      transactionStatus === "settlement" ||
+      (transactionStatus === "capture" && fraudStatus === "accept");
+
+    const isFailed =
+      transactionStatus === "cancel" ||
+      transactionStatus === "deny" ||
+      transactionStatus === "expire";
+
+    return {
+      statusCode: String(data.status_code || "200"),
+      transactionStatus,
+      fraudStatus,
+      paymentType: data.payment_type,
+      grossAmount: data.gross_amount,
+      orderId: data.order_id || orderId,
+      isPaid,
+      isFailed,
+      raw: data,
+    };
+  } catch (error) {
+    console.error("[MIDTRANS STATUS CHECK ERROR]:", error);
+    return null;
+  }
+}
+

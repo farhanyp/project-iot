@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { createSnapTransaction, createQrisTransaction } from "@/lib/midtrans";
-import { publishMqttMessage } from "@/lib/mqtt-sender";
+import { publishMqttMessage, sendMqttCommand } from "@/lib/mqtt-sender";
 
 const PAYMENT_QRIS_MODE = process.env.PAYMENT_QRIS_MODE || "core";
 
@@ -77,15 +77,24 @@ export async function POST(req: NextRequest) {
       isSimulated = qris.isSimulated;
 
       // Broadcast string QRIS langsung ke ESP32 LCD TFT melalui MQTT (non-blocking)
+      const qrPayload = {
+        action: "SHOW_QRIS",
+        nominal: amount.toLocaleString("id-ID"),
+        qris: qrString,
+        qrString,
+        amount,
+        volumeMl,
+        orderId,
+        timestamp: Date.now(),
+      };
+
+      sendMqttCommand(deviceId, qrPayload).catch((err) => {
+        console.warn("[MQTT COMMAND QRIS BROADCAST WARN]:", err);
+      });
+
       publishMqttMessage(
         `water/dispenser/${deviceId}/qr`,
-        JSON.stringify({
-          orderId,
-          amount,
-          volumeMl,
-          qrString,
-          timestamp: Date.now(),
-        })
+        JSON.stringify(qrPayload)
       ).catch((err) => {
         console.warn("[MQTT QR BROADCAST WARN]:", err);
       });

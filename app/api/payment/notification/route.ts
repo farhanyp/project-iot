@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { verifyMidtransSignature } from "@/lib/midtrans";
-import { sendMqttCommand } from "@/lib/mqtt-sender";
+import { processPaymentSettlement } from "@/lib/payment-helper";
 
 export async function GET() {
   return NextResponse.json({
@@ -62,43 +62,8 @@ export async function POST(req: NextRequest) {
       transactionStatus === "expire";
 
     if (isPaid && transaction.status === "PENDING") {
-      // Perbarui status menjadi PAID
-      await prisma.transaction.update({
-        where: { id: transaction.id },
-        data: {
-          status: "PAID",
-          paymentType: paymentType || "qris",
-          midtransStatus: transactionStatus,
-          startedAt: new Date(),
-        },
-      });
-
-      // Catat log aktivitas
-      await prisma.activityLog.create({
-        data: {
-          level: "INFO",
-          action: "PAYMENT_PAID",
-          message: `Pembayaran sukses untuk ${transaction.orderId} (Rp ${transaction.amount.toLocaleString("id-ID")}).`,
-          deviceId: transaction.deviceId,
-          metadata: {
-            orderId: transaction.orderId,
-            volumeMl: transaction.volumeMl,
-            paymentType,
-          },
-        },
-      });
-
-      // 4. PEMICU POMPA OTOMATIS: Kirim perintah START ke ESP32 via MQTT
-      const deviceCode = transaction.device.code || "DISPENSER-01";
-      await sendMqttCommand(deviceCode, {
-        action: "START",
-        volumeMl: transaction.volumeMl,
-        maxWeight: 2500,
-        transactionId: transaction.id,
-        orderId: transaction.orderId,
-      });
-
-      console.log(`[PUMP AUTO-TRIGGER] Pompa ${deviceCode} dinyalakan otomatis untuk order ${transaction.orderId}!`);
+      await processPaymentSettlement(transaction.orderId, paymentType || "qris", transactionStatus);
+      console.log(`[PUMP AUTO-TRIGGER via Webhook] Pompa dinyalakan otomatis untuk order ${transaction.orderId}!`);
     } else if (isFailed) {
       await prisma.transaction.update({
         where: { id: transaction.id },

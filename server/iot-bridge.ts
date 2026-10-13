@@ -1,6 +1,7 @@
 import mqtt from "mqtt";
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "../lib/prisma";
+import { createQrisTransaction } from "../lib/midtrans";
 
 const BROKER_URL = process.env.MQTT_BROKER_URL || "mqtt://localhost:1883";
 const WS_PORT = parseInt(process.env.WS_PORT || "3001", 10);
@@ -39,12 +40,14 @@ const mqttClient = mqtt.connect(BROKER_URL, {
 mqttClient.on("connect", () => {
   console.log(`[MQTT] Connected successfully to Mosquitto Broker!`);
 
-  // Subscribe ke topik telemetri, status, dan perintah perangkat dispenser
+  // Subscribe ke topik telemetri, status, perintah, permintaan order touch, dan pembatalan
   const topics = [
     "water/dispenser/+/status",
     "water/dispenser/+/telemetry",
     "water/dispenser/+/complete",
     "water/dispenser/+/command",
+    "water/dispenser/+/order_request",
+    "water/dispenser/+/cancel",
   ];
 
   mqttClient.subscribe(topics, (err) => {
@@ -263,6 +266,67 @@ mqttClient.on("message", async (topic, message) => {
         }
         cachedDeviceStatus = "READY";
       }
+    } else if (eventType === "order_request") {
+      console.log(`[ORDER REQUEST from Touch LCD ${deviceCode}]:`, payload);
+      const volumeMl = Number(payload.volumeMl) || 250;
+      const amount = Number(payload.amount) || 2500;
+      const packageName = payload.packageName || `Air Minum ${volumeMl} mL`;
+      const orderId = `INV-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+      try {
+        const qris = await createQrisTransaction({
+          orderId,
+          grossAmount: amount,
+          itemName: packageName,
+        });
+
+        let device = await prisma.device.findUnique({ where: { code: deviceCode } });
+        if (!device) {
+          device = await prisma.device.create({
+            data: { code: deviceCode, name: `Dispenser ${deviceCode}`, status: "READY" },
+          });
+        }
+
+        await prisma.transaction.create({
+          data: {
+            orderId,
+            deviceId: device.id,
+            volumeMl,
+            amount,
+            status: "PENDING",
+            paymentMethod: "MIDTRANS_QRIS",
+            snapToken: qris.qrString,
+          },
+        });
+
+        const qrisCommand = {
+          action: "SHOW_QRIS",
+          nominal: amount.toLocaleString("id-ID"),
+          amount,
+          volumeMl,
+          qris: qris.qrString,
+          qrString: qris.qrString,
+          orderId,
+          timeoutSeconds: 300,
+        };
+
+        mqttClient.publish(
+          `water/dispenser/${deviceCode}/command`,
+          JSON.stringify(qrisCommand),
+          { qos: 1 }
+        );
+        console.log(`[QRIS SENT TO ESP32 ${deviceCode}] Order: ${orderId}, Rp ${amount}`);
+      } catch (err) {
+        console.error(`[ORDER REQUEST ERROR for ${deviceCode}]:`, (err as Error).message);
+      }
+    } else if (eventType === "cancel") {
+      console.log(`[ORDER CANCELLED from ${deviceCode}]`);
+      if (payload.orderId) {
+        prisma.transaction.updateMany({
+          where: { orderId: payload.orderId, status: "PENDING" },
+          data: { status: "CANCELLED" },
+        }).catch((e) => console.warn("[DB Cancel Warn]:", e.message));
+      }
     }
 
     // Broadcast ke semua browser client via WebSocket
@@ -278,6 +342,21 @@ mqttClient.on("message", async (topic, message) => {
     // Sinkronisasi data ke PostgreSQL via Prisma 8
     try {
       if (eventType === "status") {
+        // Kirim daftar paket terbaru ke ESP32 agar menu selalu tersinkron
+        prisma.packagePreset.findMany({
+          where: { isActive: true },
+          orderBy: { volumeMl: "asc" },
+          select: { id: true, name: true, volumeMl: true, price: true },
+        }).then((packages) => {
+          if (packages.length > 0) {
+            mqttClient.publish(
+              `water/dispenser/${deviceCode}/packages`,
+              JSON.stringify({ packages }),
+              { qos: 1 }
+            );
+          }
+        }).catch((e) => console.warn("[SYNC PACKAGES WARN]:", e.message));
+
         // Upsert data device jika belum ada
         await prisma.device.upsert({
           where: { code: deviceCode },

@@ -176,6 +176,11 @@ export default function Home() {
     }
   };
 
+  const handleCancelPayment = () => {
+    setPaymentOrder(null);
+    sendCommand("SHOW_MENU");
+  };
+
   // Simulasi Bayar Instan (Dev/Sandbox testing)
   const handleSimulatePayment = async () => {
     if (!paymentOrder) return;
@@ -617,7 +622,7 @@ export default function Home() {
 
               <button
                 type="button"
-                onClick={() => setPaymentOrder(null)}
+                onClick={handleCancelPayment}
                 className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-2 px-4 rounded-lg text-xs transition-colors cursor-pointer"
               >
                 Batal / Tutup
