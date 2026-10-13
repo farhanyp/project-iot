@@ -75,13 +75,13 @@ void handleTouchScreen() {
   // Mapping koordinat ADC XPT2046 ke resolusi pixel 240x320
   int touchX = map(p.x, TS_MINX, TS_MAXX, 0, 240);
   int touchY = map(p.y, TS_MINY, TS_MAXY, 0, 320);
+  if (TS_FLIP_X) touchX = 240 - touchX;
+  if (TS_FLIP_Y) touchY = 320 - touchY;
 
-  if (touchX < 0) touchX = 0;
-  if (touchX > 240) touchX = 240;
-  if (touchY < 0) touchY = 0;
-  if (touchY > 320) touchY = 320;
+  touchX = constrain(touchX, 0, 240);
+  touchY = constrain(touchY, 0, 320);
 
-  Serial.printf("[TOUCH] Sentuhan terdeteksi di X=%d, Y=%d (Layar: %d)\n", touchX, touchY, currentScreen);
+  Serial.printf("[TOUCH] Raw(%d,%d) -> X=%d, Y=%d (Layar: %d)\n", p.x, p.y, touchX, touchY, currentScreen);
 
   // ----------------------------------------------------------------------------
   // KASUS 1: Di Layar Standby (Memilih Menu Paket Air)

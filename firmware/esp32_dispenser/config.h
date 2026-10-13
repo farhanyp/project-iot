@@ -43,10 +43,14 @@ const int PIN_TRIGGER_RESET_WIFI = 0; // GPIO 0 (Tombol BOOT ESP32)
 #define TFT_HEIGHT            320 // 320 untuk ST7789 240x320, 240 jika panel 1.3" 240x240 murni
 
 // ORIENTASI LAYAR:
-// 2 = Portrait Normal (Default ST7789 generik: teks terbaca normal kiri-ke-kanan)
-// 0 = Portrait (Jika casing butuh rotasi 180, aktifkan TFT_FORCE_UNMIRROR_X agar tidak mirror)
-#define TFT_ROTATION          2
-#define TFT_FORCE_UNMIRROR_X  false
+// setRotation(0) dan setRotation(2) hanya beda putar 180 derajat -> TIDAK bisa
+// menghilangkan efek cermin (mirror). Mirror hanya hilang jika TEPAT SATU bit
+// MX (0x40) atau MY (0x80) aktif. Karena itu MADCTL ditulis langsung:
+//   0x40 = Portrait normal (MX)           <- default
+//   0x80 = Portrait terbalik atas-bawah (MY) -> pakai ini jika teks normal tapi kepala di bawah
+//   +0x08 (BGR) jika warna merah & biru tertukar, contoh: 0x48 / 0x88
+#define TFT_ROTATION          0
+#define TFT_MADCTL            0x40
 #define TFT_INVERT_COLORS     false
 
 // Kalibrasi Koordinat ADC Touch XPT2046 ke Pixel (0 - 4095 -> 0 - 240 / 320)
@@ -54,6 +58,9 @@ const int PIN_TRIGGER_RESET_WIFI = 0; // GPIO 0 (Tombol BOOT ESP32)
 #define TS_MAXX 3800
 #define TS_MINY 200
 #define TS_MAXY 3800
+// Balik sumbu touch jika titik sentuh tidak sesuai posisi tombol di layar
+#define TS_FLIP_X false
+#define TS_FLIP_Y false
 
 // ==============================================================================
 // 3. KONFIGURASI PARAMETER SISTEM & DATA PAKET

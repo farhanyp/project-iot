@@ -9,14 +9,13 @@
 // Inisialisasi driver layar, rotasi, dan un-mirroring
 inline void initDisplayDriver() {
   tft.init(TFT_WIDTH, TFT_HEIGHT);
-  tft.setRotation(TFT_ROTATION);
+  tft.setRotation(TFT_ROTATION); // Set ukuran internal 240x320 (portrait)
 
-  #if TFT_FORCE_UNMIRROR_X
-    tft.startWrite();
-    tft.writeCommand(0x36);
-    tft.spiWrite(0x80); // MY=1, MX=0, MV=0, ML=0, BGR=0
-    tft.endWrite();
-  #endif
+  // Timpa MADCTL bawaan library agar tampilan tidak mirror (lihat config.h)
+  tft.startWrite();
+  tft.writeCommand(ST77XX_MADCTL);
+  tft.spiWrite(TFT_MADCTL);
+  tft.endWrite();
 
   #if TFT_INVERT_COLORS
     tft.invertDisplay(true);
