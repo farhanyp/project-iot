@@ -491,6 +491,7 @@ wss.on("connection", (ws) => {
         // Teruskan perintah ke ESP32 melalui MQTT PubSub
         const commandTopic = `water/dispenser/${deviceId}/command`;
         const commandPayload: Record<string, unknown> = {
+          ...msg,
           action,
           volumeMl,
           transactionId,

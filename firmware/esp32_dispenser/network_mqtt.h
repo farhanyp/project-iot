@@ -3,6 +3,8 @@
 #include "display_ui.h"
 #include "pump_control.h"
 #include "flow_calculator.h"
+#include "proximity_sensor.h"
+#include "buzzer_control.h"
 
 // ==============================================================================
 // MODUL JARINGAN WIFI & PROTOKOL MQTT IOT (CORE 0 DEDICATED TASK)
@@ -283,6 +285,35 @@ inline void mqttCallback(char* topic, byte* message, unsigned int length) {
       }
     }
   }
+
+  // Perintah 8: SET_BUZZER_ALARM (Tombol ON / OFF dari Web)
+  else if (action == "SET_BUZZER_ALARM") {
+    String enStr = extractJsonValue(messageStr, "enabled");
+    bool en = (enStr == "true" || enStr == "1");
+    setBuzzerAlarmEnabled(en);
+  }
+
+  // Perintah 9: RESET_SENSOR (Tombol RESET Sinkronisasi dari Web)
+  else if (action == "RESET_SENSOR") {
+    resetProximitySensor();
+    stopBuzzer();
+  }
+
+  // Perintah 10: SET_PROXIMITY_CONFIG (Simpan Jarak cm & Polaritas dari Web)
+  else if (action == "SET_PROXIMITY_CONFIG") {
+    String distStr = extractJsonValue(messageStr, "targetDistanceCm");
+    String polStr = extractJsonValue(messageStr, "activeHigh");
+    float dist = (distStr.length() > 0) ? distStr.toFloat() : targetDistanceCm;
+    bool actHigh = (polStr.length() > 0) ? (polStr == "true" || polStr == "1") : sensorActiveHigh;
+    saveProximityConfig(dist, actHigh);
+  }
+
+  // Perintah 11: TEST_BUZZER (Uji Bunyi Buzzer dari Web)
+  else if (action == "TEST_BUZZER") {
+    String cntStr = extractJsonValue(messageStr, "count");
+    int count = (cntStr.length() > 0) ? cntStr.toInt() : 1;
+    beepPattern(count);
+  }
 }
 
 // Menghubungkan ulang ke Broker MQTT secara NON-BLOCKING pada Core 0
@@ -348,7 +379,12 @@ inline void processOutgoingUIMessages() {
                        String(",\"targetMl\":") + String(uiMsg.targetMl) + 
                        String(",\"status\":\"DISPENSING\"") + 
                        String(",\"cutOffMode\":\"CALIBRATED_FLOW_TIMER\"") + 
-                       String(",\"transactionId\":\"") + String(uiMsg.orderId) + "\"}";
+                       String(",\"transactionId\":\"") + String(uiMsg.orderId) + "\"" +
+                       String(",\"isTumblerPresent\":") + (isTumblerPresent ? "true" : "false") + 
+                       String(",\"buzzerAlarmEnabled\":") + (isBuzzerAlarmEnabled ? "true" : "false") + 
+                       String(",\"isBuzzerSounding\":") + (isBuzzerSounding ? "true" : "false") + 
+                       String(",\"targetDistanceCm\":") + String(targetDistanceCm, 1) + 
+                       String(",\"rawSensorSignal\":") + String(digitalRead(PIN_PROXIMITY_SENSOR)) + "}";
       mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
     }
     else if (uiMsg.type == UI_MSG_COMPLETE) {
@@ -367,7 +403,12 @@ inline void processOutgoingUIMessages() {
       String payload = String("{\"status\":\"READY\"") + 
                        String(",\"flowRateMlPerSec\":") + String(pumpFlowRateMlPerSec, 2) + 
                        String(",\"cutOffMode\":\"CALIBRATED_FLOW_TIMER\"") + 
-                       String(",\"dispensedMl\":0,\"targetMl\":0,\"flowRate\":0.0}");
+                       String(",\"dispensedMl\":0,\"targetMl\":0,\"flowRate\":0.0") + 
+                       String(",\"isTumblerPresent\":") + (isTumblerPresent ? "true" : "false") + 
+                       String(",\"buzzerAlarmEnabled\":") + (isBuzzerAlarmEnabled ? "true" : "false") + 
+                       String(",\"isBuzzerSounding\":") + (isBuzzerSounding ? "true" : "false") + 
+                       String(",\"targetDistanceCm\":") + String(targetDistanceCm, 1) + 
+                       String(",\"rawSensorSignal\":") + String(digitalRead(PIN_PROXIMITY_SENSOR)) + "}";
       mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
     }
   }

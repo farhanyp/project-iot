@@ -22,6 +22,11 @@ export interface TelemetryData {
   isScaleReady?: boolean;
   status: "READY" | "DISPENSING" | "OFFLINE" | "COMPLETED" | "STOPPED_OVERWEIGHT" | "TIMEOUT_CUTOFF";
   transactionId?: string;
+  isTumblerPresent?: boolean;
+  buzzerAlarmEnabled?: boolean;
+  isBuzzerSounding?: boolean;
+  targetDistanceCm?: number;
+  rawSensorSignal?: number;
 }
 
 export interface IoTEvent {
@@ -39,6 +44,11 @@ export interface CommandOptions {
   factor?: number;
   maxWeight?: number;
   deviceId?: string;
+  enabled?: boolean;
+  targetDistanceCm?: number;
+  activeHigh?: boolean;
+  count?: number;
+  [key: string]: unknown;
 }
 
 export function useIoTSocket(customWsUrl?: string) {
@@ -202,10 +212,22 @@ export function useIoTSocket(customWsUrl?: string) {
   }, [connect]);
 
   // Fungsi pengiriman perintah ke ESP32 via WebSocket gateway
-  // Fungsi pengiriman perintah ke ESP32 via WebSocket gateway
   const sendCommand = useCallback(
     (
-      action: "START" | "STOP" | "TARE" | "CALIBRATE" | "SET_CAL_FACTOR" | "SET_MAX_WEIGHT" | "RESET" | "SHOW_MENU",
+      action:
+        | "START"
+        | "STOP"
+        | "TARE"
+        | "CALIBRATE"
+        | "SET_CAL_FACTOR"
+        | "SET_MAX_WEIGHT"
+        | "RESET"
+        | "SHOW_MENU"
+        | "SET_BUZZER_ALARM"
+        | "RESET_SENSOR"
+        | "SET_PROXIMITY_CONFIG"
+        | "TEST_BUZZER"
+        | string,
       optionsOrVolume?: number | CommandOptions,
       fallbackDeviceId = "DISPENSER-01"
     ) => {
@@ -214,10 +236,12 @@ export function useIoTSocket(customWsUrl?: string) {
       let factor: number | undefined;
       let maxWeight: number | undefined;
       let deviceId = fallbackDeviceId;
+      let extraOptions: Record<string, unknown> = {};
 
       if (typeof optionsOrVolume === "number") {
         volumeMl = optionsOrVolume;
       } else if (optionsOrVolume && typeof optionsOrVolume === "object") {
+        extraOptions = { ...optionsOrVolume };
         if (optionsOrVolume.volumeMl !== undefined) volumeMl = optionsOrVolume.volumeMl;
         if (optionsOrVolume.knownWeight !== undefined) knownWeight = optionsOrVolume.knownWeight;
         if (optionsOrVolume.factor !== undefined) factor = optionsOrVolume.factor;
@@ -227,6 +251,7 @@ export function useIoTSocket(customWsUrl?: string) {
 
       const payload = JSON.stringify({
         type: "COMMAND",
+        ...extraOptions,
         deviceId,
         action,
         volumeMl,
@@ -306,6 +331,40 @@ export function useIoTSocket(customWsUrl?: string) {
     [sendCommand]
   );
 
+  // Helper function untuk Mengaktifkan / Menonaktifkan Alarm Buzzer
+  const sendSetBuzzerAlarm = useCallback(
+    (enabled: boolean, deviceId = "DISPENSER-01") => {
+      setTelemetry((prev) => ({ ...prev, buzzerAlarmEnabled: enabled }));
+      return sendCommand("SET_BUZZER_ALARM", { enabled, deviceId });
+    },
+    [sendCommand]
+  );
+
+  // Helper function untuk Mereset Sensor E18-B03P1
+  const sendResetSensor = useCallback(
+    (deviceId = "DISPENSER-01") => {
+      return sendCommand("RESET_SENSOR", { deviceId });
+    },
+    [sendCommand]
+  );
+
+  // Helper function untuk Konfigurasi Jarak (cm) dan Polaritas Sensor E18-B03P1
+  const sendSetProximityConfig = useCallback(
+    (targetDistanceCm: number, activeHigh: boolean, deviceId = "DISPENSER-01") => {
+      setTelemetry((prev) => ({ ...prev, targetDistanceCm }));
+      return sendCommand("SET_PROXIMITY_CONFIG", { targetDistanceCm, activeHigh, deviceId });
+    },
+    [sendCommand]
+  );
+
+  // Helper function untuk Uji Bunyi Buzzer
+  const sendTestBuzzer = useCallback(
+    (count = 1, deviceId = "DISPENSER-01") => {
+      return sendCommand("TEST_BUZZER", { count, deviceId });
+    },
+    [sendCommand]
+  );
+
   return {
     isConnected,
     mqttConnected,
@@ -318,5 +377,9 @@ export function useIoTSocket(customWsUrl?: string) {
     sendCalibrate,
     sendSetCalFactor,
     sendSetMaxWeight,
+    sendSetBuzzerAlarm,
+    sendResetSensor,
+    sendSetProximityConfig,
+    sendTestBuzzer,
   };
 }

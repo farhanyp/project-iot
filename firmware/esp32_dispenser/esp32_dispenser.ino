@@ -22,12 +22,16 @@
 #include "pump_control.h"
 #include "flow_calculator.h"
 #include "display_ui.h"
+#include "proximity_sensor.h"
+#include "buzzer_control.h"
 #include "network_mqtt.h"
 
 // ==============================================================================
 // INISIALISASI OBJEK HARDWARE & VARIABEL GLOBAL
 // ==============================================================================
 TFT_eSPI tft = TFT_eSPI();
+// Gunakan mode polling murni tanpa T_IRQ (100% stabil di ESP32, bebas missed interrupt FreeRTOS)
+XPT2046_Touchscreen ts(TOUCH_CS);
 Preferences preferences;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
@@ -37,8 +41,11 @@ QueueHandle_t qNetToUI = NULL;
 QueueHandle_t qUIToNet = NULL;
 TaskHandle_t netTaskHandle = NULL;
 
-// Data Kalibrasi Touch XPT2046 Bawaan (Diisi dari NVS Flash / Kalibrasi Otomatis)
-uint16_t touchCalData[5] = { 260, 3550, 320, 3500, 4 };
+// Batas Nilai Kalibrasi Touch XPT2046 (Diisi dari NVS Flash / Auto-Kalibrasi)
+uint16_t touchMinX = 260;
+uint16_t touchMaxX = 3700;
+uint16_t touchMinY = 260;
+uint16_t touchMaxY = 3700;
 
 // Data paket default (akan otomatis diupdate saat tersinkronisasi dengan backend web)
 DispenserPackage dispenserPackages[MAX_PACKAGES] = {
@@ -76,6 +83,18 @@ unsigned long lastAnimationTime       = 0;
 char activeOrderId[40]                = "";
 char activeNominalStr[16]             = "";
 char activeQrPayload[256]             = "";
+
+// Variabel Kontrol Sensor E18-B03P1 & Buzzer
+bool isTumblerPresent                 = false;
+bool isBuzzerAlarmEnabled             = true;
+bool isBuzzerSounding                 = false;
+float targetDistanceCm                = 8.0f;
+bool sensorActiveHigh                 = true; // E18-B03P1 PNP NO (HIGH saat objek terdeteksi)
+
+// State Machine Buzzer Non-Blocking Bebas Konflik Antar-Core
+volatile unsigned long buzzerBeepUntil        = 0;
+volatile int buzzerBeepCountRemaining         = 0;
+volatile unsigned long buzzerNextBeepTime     = 0;
 
 // ==============================================================================
 // PEMROSESAN PESAN MASUK DARI NETWORK TASK CORE 0 KE UI CORE 1
@@ -144,15 +163,13 @@ void handleIncomingNetworkMessages() {
 // HANDLER SENTUHAN LAYAR TOUCH SCREEN TERPADU (TFT_eSPI Zero-Lag & Filtered)
 // ==============================================================================
 void handleTouchScreen() {
-  uint16_t touchX = 0, touchY = 0;
+  int touchX = 0, touchY = 0;
 
-  // Baca sentuhan melalui fungsi bawaan TFT_eSPI yang sudah terintegrasi SPI & filter noise
-  bool isTouched = tft.getTouch(&touchX, &touchY, 400);
+  // Baca sentuhan melalui fungsi terisolasi SPI XPT2046 dengan filter noise
+  bool isTouched = getDisplayTouch(touchX, touchY);
   if (!isTouched) return;
 
-  touchX = constrain(touchX, 0, DISP_WIDTH);
-  touchY = constrain(touchY, 0, DISP_HEIGHT);
-
+  beepOnce(40); // Feedback audio sentuhan tombol
   Serial.printf("[TOUCH] X=%d, Y=%d (Screen: %d)\n", touchX, touchY, currentScreen);
 
   // ----------------------------------------------------------------------------
@@ -265,7 +282,29 @@ void handleTouchScreen() {
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_PLACE_TUMBLER) {
     if (touchY >= 165 && touchY <= 240 && touchX >= 10 && touchX <= 230) {
-      Serial.println("[TOUCH] Tombol NEXT ditekan! Wadah sudah diletakkan.");
+      // Proteksi Keamanan: Cegah air tumpah jika tumbler belum diletakkan di bawah corong
+      if (!isTumblerPresent) {
+        Serial.println("[SAFETY] Tombol NEXT ditekan tapi tumbler belum terdeteksi di sensor!");
+        tft.fillRoundRect(10, 174, 220, 54, 8, TFT_RED);
+        tft.setTextColor(TFT_WHITE, TFT_RED);
+        tft.setTextSize(2);
+        tft.setCursor(20, 190);
+        tft.print("PASANG TUMBLER!");
+        beepPattern(2);
+        delay(600);
+        tft.fillRoundRect(10, 174, 220, 54, 8, TFT_GREEN);
+        tft.drawRoundRect(10, 174, 220, 54, 8, TFT_WHITE);
+        tft.setTextColor(TFT_BLACK, TFT_GREEN);
+        tft.setTextSize(2);
+        tft.setCursor(32, 186);
+        tft.print("LANJUT (NEXT) >");
+        tft.setTextSize(1);
+        tft.setCursor(25, 210);
+        tft.print("Sentuh di sini untuk isi air");
+        return;
+      }
+
+      Serial.println("[TOUCH] Tombol NEXT ditekan! Wadah sudah terdeteksi di sensor.");
 
       // Feedback visual seketika
       tft.fillRoundRect(10, 174, 220, 54, 8, TFT_GREEN);
@@ -334,6 +373,11 @@ void setup() {
   // Inisialisasi Model Debit Pompa Presisi (NVS Flash)
   initFlowCalculator();
 
+  // Inisialisasi Sensor Infrared Photoelectric E18-B03P1 & Buzzer
+  initProximitySensor();
+  initBuzzer();
+  beepOnce(100);
+
   // Inisialisasi WiFiManager Captive Portal (Sinkron saat boot)
   setupWiFiManager();
 
@@ -360,12 +404,16 @@ void setup() {
 // LOOP UTAMA: DEDICATED UI & CONTROL TASK (BERJALAN DI CORE 1 APP_CPU)
 // ==============================================================================
 void loop() {
-  // 1. Proses Pesan Masuk dari Core 0 (Event Jaringan & MQTT)
+  // 1. Baca Sensor Proximity E18-B03P1 & Evaluasi Alarm Buzzer
+  isTumblerPresent = checkTumblerPresent();
+  updateSensorBuzzerAlarm(isTumblerPresent);
+
+  // 2. Proses Pesan Masuk dari Core 0 (Event Jaringan & MQTT)
   handleIncomingNetworkMessages();
 
   unsigned long currentMillis = millis();
 
-  // 2. Baca Input Sentuhan Layar Touch Screen (High Priority, Zero-Lag)
+  // 3. Baca Input Sentuhan Layar Touch Screen (High Priority, Zero-Lag)
   handleTouchScreen();
 
   // 3. Status 1: Proses Pengisian Air Sedang Berlangsung (Dispensing)

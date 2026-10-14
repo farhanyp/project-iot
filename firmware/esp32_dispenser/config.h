@@ -4,7 +4,8 @@
 #include <PubSubClient.h>
 #include <WiFiManager.h>      // Library WiFiManager oleh tzapu
 #include <Preferences.h>      // Simpan IP MQTT, Kalibrasi Debit, & Kalibrasi Touch ke NVS Flash
-#include <TFT_eSPI.h>         // Library TFT & Touch performa tinggi dengan akselerasi hardware
+#include <TFT_eSPI.h>         // Library TFT performa tinggi dengan akselerasi hardware
+#include <XPT2046_Touchscreen.h> // Library Touch Screen XPT2046
 #include <SPI.h>
 #include <qrcode.h>
 
@@ -22,11 +23,19 @@
 // TOUCH_CS         = GPIO 21 (Chip Select Touch Screen XPT2046)
 // TOUCH_IRQ        = GPIO 22 (T_IRQ - Deteksi interrupt sentuhan)
 
-#define TOUCH_IRQ_PIN 22 // GPIO 22 untuk deteksi hardware interrupt sentuhan
+#define TFT_CS         17
+#define TFT_DC          2
+#define TFT_RST        15
+#define TOUCH_CS       21
+#define TOUCH_IRQ_PIN  22 // GPIO 22 untuk deteksi hardware interrupt sentuhan
 
 // Pin Modul Relay Pompa Air BR314
 const int PIN_RELAY_PUMP_CH1     = 5;  // GPIO 5 (Pompa Air, Active LOW)
 const int PIN_TRIGGER_RESET_WIFI = 0;  // GPIO 0 (Tombol BOOT ESP32)
+
+// Pin Sensor Infrared Photoelectric E18-B03P1 & Buzzer
+const int PIN_PROXIMITY_SENSOR   = 26; // GPIO 26 (Kabel Hitam E18 via divider 1k/2k)
+const int PIN_BUZZER             = 27; // GPIO 27 (Kaki Positif Buzzer)
 
 #define RELAY_ACTIVE_STATE LOW
 
@@ -36,6 +45,17 @@ const int PIN_TRIGGER_RESET_WIFI = 0;  // GPIO 0 (Tombol BOOT ESP32)
 #define DISP_WIDTH            240
 #define DISP_HEIGHT           320 // 320 untuk ST7789 240x320
 #define DISP_ROTATION         0   // Portrait
+
+// Konfigurasi Nilai Register MADCTL ST7789 (Mengatasi Masalah Tampilan Tulisan Cermin):
+// 0x40 = Portrait Kiri-ke-Kanan (MX=1, MY=0) -> Memperbaiki teks terbalik kanan-ke-kiri
+// 0x00 = Default TFT_eSPI (jika panel tidak cermin)
+// 0x80 = Portrait Terbalik 180 Derajat (MY=1, MX=0) -> Jika teks normal tapi kepala di bawah
+// Tambahkan 0x08 jika warna Merah dan Biru tertukar (BGR) -> contoh: 0x48 atau 0x88
+#define TFT_MADCTL_VAL        0x40
+
+// Pembalik sumbu sentuh (Ubah ke true jika titik sentuh berlawanan dengan posisi tombol)
+#define TS_FLIP_X             false
+#define TS_FLIP_Y             false
 
 // Alias Warna Kompatibilitas (TFT_eSPI 16-bit 565 Color)
 #define ST77XX_BLACK   TFT_BLACK
@@ -133,12 +153,16 @@ enum ScreenState {
 // 6. DEKLARASI INSTANCE OBJEK & VARIABEL GLOBAL (EXTERN)
 // ==============================================================================
 extern TFT_eSPI tft;
+extern XPT2046_Touchscreen ts;
 extern Preferences preferences;
 extern WiFiClient espClient;
 extern PubSubClient mqttClient;
 
-// Data Kalibrasi Touch XPT2046 Bawaan TFT_eSPI
-extern uint16_t touchCalData[5];
+// Data Kalibrasi Touch XPT2046
+extern uint16_t touchMinX;
+extern uint16_t touchMaxX;
+extern uint16_t touchMinY;
+extern uint16_t touchMaxY;
 
 extern char mqtt_broker[40];
 extern float pumpFlowRateMlPerSec;
@@ -168,3 +192,15 @@ extern unsigned long lastAnimationTime;
 extern char activeOrderId[40];
 extern char activeNominalStr[16];
 extern char activeQrPayload[256];
+
+// Variabel Kontrol Sensor E18-B03P1 & Buzzer
+extern bool isTumblerPresent;
+extern bool isBuzzerAlarmEnabled;
+extern bool isBuzzerSounding;
+extern float targetDistanceCm;
+extern bool sensorActiveHigh;
+
+// State Machine Buzzer Non-Blocking Bebas Konflik Antar-Core
+extern volatile unsigned long buzzerBeepUntil;
+extern volatile int buzzerBeepCountRemaining;
+extern volatile unsigned long buzzerNextBeepTime;
