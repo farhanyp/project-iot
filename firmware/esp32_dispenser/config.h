@@ -3,10 +3,8 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <WiFiManager.h>      // Library WiFiManager oleh tzapu
-#include <Preferences.h>      // Simpan IP MQTT & Kalibrasi Debit Pompa ke NVS Flash
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7789.h>
-#include <XPT2046_Touchscreen.h> // Library Touch Screen XPT2046 oleh Paul Stoffregen
+#include <Preferences.h>      // Simpan IP MQTT, Kalibrasi Debit, & Kalibrasi Touch ke NVS Flash
+#include <TFT_eSPI.h>         // Library TFT & Touch performa tinggi dengan akselerasi hardware
 #include <SPI.h>
 #include <qrcode.h>
 
@@ -14,56 +12,94 @@
 // 1. DEFINISI PIN PERANGKAT KERAS (HARDWARE PINOUT)
 // ==============================================================================
 
-// Pin Layar LCD TFT SPI ST7789
-#define TFT_CS    17   // GPIO 17 (Chip Select LCD)
-#define TFT_DC     2   // GPIO 2  (Data / Command)
-#define TFT_RST   15   // GPIO 15 (Reset LCD)
-// Catatan SPI Layar: SCL/SCK = GPIO 18, SDA/MOSI = GPIO 23 (Hardware VSPI default ESP32)
+// Catatan Pin Layar ST7789 & Touch XPT2046 (Jalur Hardware VSPI ESP32):
+// TFT_MOSI / T_DIN = GPIO 23
+// TFT_SCLK / T_CLK = GPIO 18
+// TFT_MISO / T_DO  = GPIO 19
+// TFT_CS           = GPIO 17 (Chip Select LCD)
+// TFT_DC           = GPIO 2  (Data / Command LCD)
+// TFT_RST          = GPIO 15 (Reset LCD)
+// TOUCH_CS         = GPIO 21 (Chip Select Touch Screen XPT2046)
+// TOUCH_IRQ        = GPIO 22 (T_IRQ - Deteksi interrupt sentuhan)
 
-// Pin Touch Screen SPI XPT2046 (Berbagi jalur Hardware VSPI dengan Layar LCD)
-#define TOUCH_CS   21  // GPIO 21 (T_CS)
-#define TOUCH_IRQ  22  // GPIO 22 (T_IRQ - Interrupt deteksi sentuhan)
-// Catatan SPI Touch:
-// T_CLK = GPIO 18 (Digabung dengan SCK Layar)
-// T_DIN = GPIO 23 (Digabung dengan MOSI Layar)
-// T_DO  = GPIO 19 (MISO khusus touch)
+#define TOUCH_IRQ_PIN 22 // GPIO 22 untuk deteksi hardware interrupt sentuhan
 
 // Pin Modul Relay Pompa Air BR314
-const int PIN_RELAY_PUMP_CH1  = 5;  // GPIO 5 (Pompa Air, Active LOW)
-
-// Pin Tombol BOOT Onboard untuk Reset Pengaturan WiFi
-const int PIN_TRIGGER_RESET_WIFI = 0; // GPIO 0 (Tombol BOOT ESP32)
+const int PIN_RELAY_PUMP_CH1     = 5;  // GPIO 5 (Pompa Air, Active LOW)
+const int PIN_TRIGGER_RESET_WIFI = 0;  // GPIO 0 (Tombol BOOT ESP32)
 
 #define RELAY_ACTIVE_STATE LOW
 
 // ==============================================================================
 // 2. KONFIGURASI RESOLUSI, ORIENTASI & KALIBRASI TOUCH
 // ==============================================================================
-#define TFT_WIDTH             240
-#define TFT_HEIGHT            320 // 320 untuk ST7789 240x320, 240 jika panel 1.3" 240x240 murni
+#define DISP_WIDTH            240
+#define DISP_HEIGHT           320 // 320 untuk ST7789 240x320
+#define DISP_ROTATION         0   // Portrait
 
-// ORIENTASI LAYAR:
-// setRotation(0) dan setRotation(2) hanya beda putar 180 derajat -> TIDAK bisa
-// menghilangkan efek cermin (mirror). Mirror hanya hilang jika TEPAT SATU bit
-// MX (0x40) atau MY (0x80) aktif. Karena itu MADCTL ditulis langsung:
-//   0x40 = Portrait normal (MX)           <- default
-//   0x80 = Portrait terbalik atas-bawah (MY) -> pakai ini jika teks normal tapi kepala di bawah
-//   +0x08 (BGR) jika warna merah & biru tertukar, contoh: 0x48 / 0x88
-#define TFT_ROTATION          0
-#define TFT_MADCTL            0x40
-#define TFT_INVERT_COLORS     false
-
-// Kalibrasi Koordinat ADC Touch XPT2046 ke Pixel (0 - 4095 -> 0 - 240 / 320)
-#define TS_MINX 200
-#define TS_MAXX 3800
-#define TS_MINY 200
-#define TS_MAXY 3800
-// Balik sumbu touch jika titik sentuh tidak sesuai posisi tombol di layar
-#define TS_FLIP_X false
-#define TS_FLIP_Y false
+// Alias Warna Kompatibilitas (TFT_eSPI 16-bit 565 Color)
+#define ST77XX_BLACK   TFT_BLACK
+#define ST77XX_WHITE   TFT_WHITE
+#define ST77XX_RED     TFT_RED
+#define ST77XX_GREEN   TFT_GREEN
+#define ST77XX_BLUE    TFT_BLUE
+#define ST77XX_CYAN    TFT_CYAN
+#define ST77XX_YELLOW  TFT_YELLOW
 
 // ==============================================================================
-// 3. KONFIGURASI PARAMETER SISTEM & DATA PAKET
+// 3. STRUKTUR PESAN FREERTOS ANTAR-CORE (THREAD-SAFE INTER-CORE QUEUE)
+// ==============================================================================
+
+// Pesan dari Network Task (Core 0) ke UI Task (Core 1)
+enum NetToUIMsgType {
+  NET_MSG_NONE = 0,
+  NET_MSG_PAYMENT_SUCCESS,
+  NET_MSG_SHOW_QRIS,
+  NET_MSG_PACKAGES_UPDATED,
+  NET_MSG_CMD_START,
+  NET_MSG_CMD_STOP,
+  NET_MSG_CMD_RESET
+};
+
+struct NetToUIMessage {
+  NetToUIMsgType type;
+  unsigned long volumeMl;
+  char orderId[40];
+  char nominal[16];
+  char qrPayload[256];
+  unsigned long timeoutSeconds;
+};
+
+// Pesan dari UI Task (Core 1) ke Network Task (Core 0)
+enum UIToNetMsgType {
+  UI_MSG_NONE = 0,
+  UI_MSG_ORDER_REQUEST,
+  UI_MSG_ORDER_CANCEL,
+  UI_MSG_TELEMETRY,
+  UI_MSG_COMPLETE,
+  UI_MSG_STATUS_READY
+};
+
+struct UIToNetMessage {
+  UIToNetMsgType type;
+  unsigned long volumeMl;
+  long price;
+  char packageId[38];
+  char packageName[32];
+  char orderId[40];
+  char statusStr[24];
+  unsigned long dispensedMl;
+  unsigned long targetMl;
+  float flowRateLpm;
+  float flowRateMlPerSec;
+};
+
+// Handle Antrean FreeRTOS
+extern QueueHandle_t qNetToUI;
+extern QueueHandle_t qUIToNet;
+
+// ==============================================================================
+// 4. KONFIGURASI PARAMETER SISTEM & DATA PAKET
 // ==============================================================================
 const int   MQTT_PORT                 = 1883;
 const char* DEVICE_ID                 = "DISPENSER-01";
@@ -82,7 +118,7 @@ extern DispenserPackage dispenserPackages[MAX_PACKAGES];
 extern int totalPackages;
 
 // ==============================================================================
-// 4. ENUM STATUS TAMPILAN LAYAR (SESUAI ALUR BARU)
+// 5. ENUM STATUS TAMPILAN LAYAR (SESUAI ALUR 6-TAHAP)
 // ==============================================================================
 enum ScreenState {
   SCREEN_BOOT_WIFI,      // 1. Tampilan WiFi & status koneksi simpel
@@ -94,18 +130,21 @@ enum ScreenState {
 };
 
 // ==============================================================================
-// 5. DEKLARASI INSTANCE OBJEK & VARIABEL GLOBAL (EXTERN)
+// 6. DEKLARASI INSTANCE OBJEK & VARIABEL GLOBAL (EXTERN)
 // ==============================================================================
-extern Adafruit_ST7789 tft;
-extern XPT2046_Touchscreen ts;
+extern TFT_eSPI tft;
 extern Preferences preferences;
 extern WiFiClient espClient;
 extern PubSubClient mqttClient;
+
+// Data Kalibrasi Touch XPT2046 Bawaan TFT_eSPI
+extern uint16_t touchCalData[5];
 
 extern char mqtt_broker[40];
 extern float pumpFlowRateMlPerSec;
 extern unsigned long requiredDispenseDurationMs;
 extern unsigned long lastTelemetryPublishTime;
+extern unsigned long lastMqttRetryTime;
 
 extern bool isDispensing;
 extern unsigned long targetMilliLitres;
@@ -118,10 +157,11 @@ extern unsigned long lastMlShown;
 extern int lastBarWidth;
 extern unsigned long autoResetScreenTime;
 
-// Variabel Khusus Alur Baru
+// Variabel Khusus Alur Interaktif
 extern unsigned long qrisStartTime;
 extern unsigned long qrisDurationSeconds;
 extern unsigned long lastCountdownSecond;
+extern unsigned long qrisIgnoreTouchUntil;
 extern int activePackageIndex;
 extern int animationFrame;
 extern unsigned long lastAnimationTime;

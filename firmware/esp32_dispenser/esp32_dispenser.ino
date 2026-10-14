@@ -1,17 +1,21 @@
 /*
  * Firmware ESP32 Dispenser Air Minum Otomatis Berbayar (WaterVend IoT)
- * Versi Interaktif Full Flow (Touch Screen XPT2046, Dynamic Menu Web, Countdown QRIS 5 Menit, Animasi Air)
+ * Versi Arsitektur FreeRTOS Dual-Core + TFT_eSPI (Zero-Lag, Zero-Glitch, Auto-Calibrated Touch)
+ * 
+ * Pembagian Core ESP32 (Hardware Multi-Threading):
+ * - Core 0 (PRO_CPU) : Dedicated Network Task (WiFiManager, MQTT loop, publish telemetry, inter-core queue)
+ * - Core 1 (APP_CPU) : Dedicated UI & Control Task (ST7789 40MHz, touch polling, water animation, pump relay)
  * 
  * Sistem Pemodelan Aliran Presisi Tinggi (Tanpa Sensor Berat Loadcell HX711):
  * - Memanfaatkan kalibrasi debit air berbasis waktu, inersia motor, dan kompensasi ramp-up/coasting
  * - Alur 6 Tahap UI/UX Interaktif dengan Touch Screen
  * 
  * Struktur Modular:
- * - config.h          : Definisi pin hardware, parameter sistem, paket, dan variabel global
- * - pump_control.h    : Driver kontrol relay pompa air BR314
+ * - config.h          : Pin hardware, struct antrean FreeRTOS, parameter sistem, dan variabel global
+ * - pump_control.h    : Driver relay pompa air BR314 (Tri-state anti-glitch)
  * - flow_calculator.h : Model hidrolik estimasi volume air presisi & kalibrasi NVS Flash
- * - display_ui.h      : Tampilan LCD TFT SPI ST7789, QRIS, Animasi Air, dan UI Touch
- * - network_mqtt.h    : Jaringan WiFiManager captive portal & protokol MQTT IoT
+ * - display_ui.h      : Driver LCD TFT ST7789, auto-kalibrasi touch NVS, QRIS, & animasi air
+ * - network_mqtt.h    : Driver jaringan WiFi & MQTT protocol yang berjalan di Core 0
  */
 
 #include "config.h"
@@ -23,13 +27,20 @@
 // ==============================================================================
 // INISIALISASI OBJEK HARDWARE & VARIABEL GLOBAL
 // ==============================================================================
-Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
-XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
+TFT_eSPI tft = TFT_eSPI();
 Preferences preferences;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-// Data paket default (akan otomatis diupdate saat terkoneksi ke backend web)
+// Handle Antrean FreeRTOS & Task Core 0
+QueueHandle_t qNetToUI = NULL;
+QueueHandle_t qUIToNet = NULL;
+TaskHandle_t netTaskHandle = NULL;
+
+// Data Kalibrasi Touch XPT2046 Bawaan (Diisi dari NVS Flash / Kalibrasi Otomatis)
+uint16_t touchCalData[5] = { 260, 3550, 320, 3500, 4 };
+
+// Data paket default (akan otomatis diupdate saat tersinkronisasi dengan backend web)
 DispenserPackage dispenserPackages[MAX_PACKAGES] = {
   {"pkg-1", "CUP_250ML", "Gelas Mini", 250, 2500},
   {"pkg-2", "BOTTLE_600ML", "Botol Sedang", 600, 6000},
@@ -41,6 +52,7 @@ char mqtt_broker[40]                  = "192.168.1.4";
 float pumpFlowRateMlPerSec            = 25.0f;
 unsigned long requiredDispenseDurationMs = 0;
 unsigned long lastTelemetryPublishTime = 0;
+unsigned long lastMqttRetryTime       = 0;
 
 bool isDispensing                     = false;
 unsigned long targetMilliLitres       = 0;
@@ -53,10 +65,11 @@ unsigned long lastMlShown             = 999999;
 int lastBarWidth                      = -1;
 unsigned long autoResetScreenTime     = 0;
 
-// Variabel Khusus Alur Baru
+// Variabel Khusus Alur Interaktif
 unsigned long qrisStartTime           = 0;
 unsigned long qrisDurationSeconds     = 300; // 5 Menit
 unsigned long lastCountdownSecond     = 0;
+unsigned long qrisIgnoreTouchUntil    = 0;
 int activePackageIndex                = -1;
 int animationFrame                    = 0;
 unsigned long lastAnimationTime       = 0;
@@ -65,23 +78,82 @@ char activeNominalStr[16]             = "";
 char activeQrPayload[256]             = "";
 
 // ==============================================================================
-// HANDLER SENTUHAN LAYAR TOUCH SCREEN (XPT2046)
+// PEMROSESAN PESAN MASUK DARI NETWORK TASK CORE 0 KE UI CORE 1
+// ==============================================================================
+void handleIncomingNetworkMessages() {
+  if (qNetToUI == NULL) return;
+
+  NetToUIMessage netMsg;
+  while (xQueueReceive(qNetToUI, &netMsg, 0) == pdTRUE) {
+    Serial.printf("[UI Core 1] Menerima pesan dari Core 0 (Tipe: %d)\n", netMsg.type);
+
+    if (netMsg.type == NET_MSG_PAYMENT_SUCCESS) {
+      targetMilliLitres = (netMsg.volumeMl > 0) ? netMsg.volumeMl : 600;
+      currentTransactionId = String(netMsg.orderId);
+      Serial.printf("[UI Core 1] Pembayaran Lunas! Target: %lu mL (Order: %s)\n", targetMilliLitres, netMsg.orderId);
+      showPlaceTumblerScreen(targetMilliLitres, netMsg.orderId);
+    }
+    else if (netMsg.type == NET_MSG_SHOW_QRIS) {
+      unsigned long durSec = (netMsg.timeoutSeconds >= 60) ? netMsg.timeoutSeconds : 300;
+      // Jika saat ini sudah di layar QRIS, jangan potong countdown yang sedang berjalan!
+      if (currentScreen == SCREEN_QRIS && qrisStartTime > 0) {
+        unsigned long elapsed = (millis() - qrisStartTime) / 1000;
+        if (elapsed < qrisDurationSeconds) {
+          durSec = qrisDurationSeconds - elapsed;
+        }
+      }
+      showQRISScreen(netMsg.nominal, netMsg.qrPayload, durSec);
+      qrisIgnoreTouchUntil = millis() + 2500;
+    }
+    else if (netMsg.type == NET_MSG_PACKAGES_UPDATED) {
+      if (currentScreen == SCREEN_STANDBY) {
+        showStandbyScreen();
+      }
+    }
+    else if (netMsg.type == NET_MSG_CMD_START) {
+      targetMilliLitres = (netMsg.volumeMl > 0) ? netMsg.volumeMl : 600;
+      currentTransactionId = String(netMsg.orderId);
+      requiredDispenseDurationMs = calculateDispenseDurationMs(targetMilliLitres);
+      dispensedMilliLitres = 0;
+      dispenseStartTime = millis();
+      isDispensing = true;
+
+      startPump();
+      showDispensingScreen(targetMilliLitres);
+    }
+    else if (netMsg.type == NET_MSG_CMD_STOP) {
+      isDispensing = false;
+      stopPump();
+      showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Tombol Stop Darurat Ditekan");
+    }
+    else if (netMsg.type == NET_MSG_CMD_RESET) {
+      // HANYA reset jika bukan sedang di SCREEN_QRIS atau SCREEN_DISPENSING
+      if (currentScreen != SCREEN_QRIS && currentScreen != SCREEN_DISPENSING) {
+        isDispensing = false;
+        stopPump();
+        dispensedMilliLitres = 0;
+        targetMilliLitres = 0;
+        currentTransactionId = "";
+        showStandbyScreen();
+      }
+    }
+  }
+}
+
+// ==============================================================================
+// HANDLER SENTUHAN LAYAR TOUCH SCREEN TERPADU (TFT_eSPI Zero-Lag & Filtered)
 // ==============================================================================
 void handleTouchScreen() {
-  if (!ts.touched()) return;
+  uint16_t touchX = 0, touchY = 0;
 
-  TS_Point p = ts.getPoint();
+  // Baca sentuhan melalui fungsi bawaan TFT_eSPI yang sudah terintegrasi SPI & filter noise
+  bool isTouched = tft.getTouch(&touchX, &touchY, 400);
+  if (!isTouched) return;
 
-  // Mapping koordinat ADC XPT2046 ke resolusi pixel 240x320
-  int touchX = map(p.x, TS_MINX, TS_MAXX, 0, 240);
-  int touchY = map(p.y, TS_MINY, TS_MAXY, 0, 320);
-  if (TS_FLIP_X) touchX = 240 - touchX;
-  if (TS_FLIP_Y) touchY = 320 - touchY;
+  touchX = constrain(touchX, 0, DISP_WIDTH);
+  touchY = constrain(touchY, 0, DISP_HEIGHT);
 
-  touchX = constrain(touchX, 0, 240);
-  touchY = constrain(touchY, 0, 320);
-
-  Serial.printf("[TOUCH] Raw(%d,%d) -> X=%d, Y=%d (Layar: %d)\n", p.x, p.y, touchX, touchY, currentScreen);
+  Serial.printf("[TOUCH] X=%d, Y=%d (Screen: %d)\n", touchX, touchY, currentScreen);
 
   // ----------------------------------------------------------------------------
   // KASUS 1: Di Layar Standby (Memilih Menu Paket Air)
@@ -96,43 +168,95 @@ void handleTouchScreen() {
       int yStart = cardY + i * (cardH + cardGap);
       int yEnd = yStart + cardH;
 
-      if (touchY >= yStart && touchY <= yEnd) {
+      // Area toleransi sentuhan kartu
+      if (touchY >= (yStart - 4) && touchY <= (yEnd + 4) && touchX >= 8 && touchX <= 232) {
         Serial.printf("[TOUCH] Menu %d dipilih: %s (%d mL - Rp %ld)\n", 
                       i + 1, dispenserPackages[i].name, dispenserPackages[i].volumeMl, dispenserPackages[i].price);
-        
+
+        // 1. FEEDBACK VISUAL INSTAN (<1ms via TFT_eSPI)
+        tft.drawRoundRect(10, yStart, 220, cardH, 6, TFT_GREEN);
+        tft.fillRoundRect(172, yStart + 10, 50, 26, 4, TFT_GREEN);
+        tft.setTextColor(TFT_BLACK, TFT_GREEN);
+        tft.setTextSize(1);
+        tft.setCursor(182, yStart + 19);
+        tft.print("OK!");
+
         activePackageIndex = i;
         targetMilliLitres = dispenserPackages[i].volumeMl;
 
-        // Kirim request pembuatan order QRIS ke backend via MQTT
-        String topicOrder = String("water/dispenser/") + DEVICE_ID + "/order_request";
-        String payload = String("{\"volumeMl\":") + String(dispenserPackages[i].volumeMl) +
-                         String(",\"amount\":") + String(dispenserPackages[i].price) +
-                         String(",\"packageId\":\"") + String(dispenserPackages[i].id) + "\"" +
-                         String(",\"packageName\":\"") + String(dispenserPackages[i].name) + "\"}";
-        mqttClient.publish(topicOrder.c_str(), payload.c_str());
+        // 2. Kirim pesan request pembuatan QRIS ke Core 0 melalui FreeRTOS Queue
+        UIToNetMessage uiMsg;
+        memset(&uiMsg, 0, sizeof(uiMsg));
+        uiMsg.type = UI_MSG_ORDER_REQUEST;
+        uiMsg.volumeMl = dispenserPackages[i].volumeMl;
+        uiMsg.price = dispenserPackages[i].price;
+        strncpy(uiMsg.packageId, dispenserPackages[i].id, sizeof(uiMsg.packageId) - 1);
+        strncpy(uiMsg.packageName, dispenserPackages[i].name, sizeof(uiMsg.packageName) - 1);
 
-        // Tampilkan layar QRIS (sementara tampilkan QR default / menunggu payload web)
+        if (qUIToNet != NULL) {
+          xQueueSend(qUIToNet, &uiMsg, 0);
+        }
+
+        // 3. Tampilkan layar QRIS (countdown 5 menit = 300 detik)
         char nomStr[16];
         snprintf(nomStr, sizeof(nomStr), "%ld", dispenserPackages[i].price);
         showQRISScreen(nomStr, "00020101021226600016ID.WATERVEND.WWW520458125303360540660005802ID5913WATERVEND IOT6007BANDUNG6304ABCD", 300);
-        delay(400); // Debounce
+
+        // Kunci sentuhan 3 detik penuh agar jari pembeli tidak memicu tombol batal
+        qrisIgnoreTouchUntil = millis() + 3000;
         return;
       }
     }
   }
 
   // ----------------------------------------------------------------------------
-  // KASUS 2: Di Layar QRIS (Tombol Batalkan Pesanan)
+  // KASUS 2: Di Layar QRIS (Tombol Batalkan Pesanan - Anti False Trigger & Hold Debounce)
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_QRIS) {
-    if (touchY >= 195 && touchY <= 236) {
-      Serial.println("[TOUCH] Customer membatalkan pesanan QRIS.");
-      String topicCancel = String("water/dispenser/") + DEVICE_ID + "/cancel";
-      mqttClient.publish(topicCancel.c_str(), "{\"status\":\"CANCELLED\"}");
-      
-      showStandbyScreen();
-      delay(400);
-      return;
+    if (millis() < qrisIgnoreTouchUntil) return;
+
+    static unsigned long cancelPressStart = 0;
+
+    // Batasi koordinat sentuh tombol secara ketat (X: 20-220, Y: 288-318)
+    if (touchX >= 20 && touchX <= 220 && touchY >= 288 && touchY <= 318) {
+      if (cancelPressStart == 0) {
+        cancelPressStart = millis();
+        // Beri feedback visual tombol ditekan
+        tft.fillRoundRect(8, 292, 224, 24, 4, TFT_RED);
+        tft.setTextColor(TFT_WHITE, TFT_RED);
+        tft.setTextSize(1);
+        tft.setCursor(65, 300);
+        tft.print("[ MEMBATALKAN... ]");
+        return;
+      }
+
+      // Wajib ditahan minimal 300ms untuk memastikan ini sentuhan sengaja (bukan noise / sentuhan sesaat)
+      if (millis() - cancelPressStart >= 300) {
+        Serial.println("[TOUCH] Customer mengonfirmasi pembatalan pesanan QRIS.");
+        cancelPressStart = 0;
+        
+        // Kirim pesan pembatalan ke Core 0
+        UIToNetMessage uiMsg;
+        memset(&uiMsg, 0, sizeof(uiMsg));
+        uiMsg.type = UI_MSG_ORDER_CANCEL;
+        if (qUIToNet != NULL) {
+          xQueueSend(qUIToNet, &uiMsg, 0);
+        }
+        
+        showStandbyScreen();
+        return;
+      }
+    } else {
+      if (cancelPressStart != 0) {
+        cancelPressStart = 0;
+        // Kembalikan tampilan tombol normal jika jari terlepas sebelum 300ms
+        tft.fillRoundRect(8, 292, 224, 24, 4, 0x3000);
+        tft.drawRoundRect(8, 292, 224, 24, 4, TFT_RED);
+        tft.setTextColor(TFT_WHITE, 0x3000);
+        tft.setTextSize(1);
+        tft.setCursor(75, 300);
+        tft.print("[ BATALKAN ]");
+      }
     }
   }
 
@@ -140,8 +264,15 @@ void handleTouchScreen() {
   // KASUS 3: Di Layar Letakkan Tumbler (Tombol LANJUT / NEXT)
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_PLACE_TUMBLER) {
-    if (touchY >= 170 && touchY <= 235) {
+    if (touchY >= 165 && touchY <= 240 && touchX >= 10 && touchX <= 230) {
       Serial.println("[TOUCH] Tombol NEXT ditekan! Wadah sudah diletakkan.");
+
+      // Feedback visual seketika
+      tft.fillRoundRect(10, 174, 220, 54, 8, TFT_GREEN);
+      tft.setTextColor(TFT_BLACK, TFT_GREEN);
+      tft.setTextSize(2);
+      tft.setCursor(35, 190);
+      tft.print("MEMULAI...");
 
       requiredDispenseDurationMs = calculateDispenseDurationMs(targetMilliLitres);
       dispensedMilliLitres = 0;
@@ -151,7 +282,6 @@ void handleTouchScreen() {
       // Nyalakan Pompa & Pindah ke Animasi Dispensing
       startPump();
       showDispensingScreen(targetMilliLitres);
-      delay(400);
       return;
     }
   }
@@ -160,20 +290,23 @@ void handleTouchScreen() {
   // KASUS 4: Di Layar Pengisian Air (Tombol STOP Darurat)
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_DISPENSING) {
-    if (touchY >= 195 && touchY <= 236) {
+    if (touchY >= 190 && touchY <= 240 && touchX >= 10 && touchX <= 230) {
       Serial.println("[TOUCH] STOP DARURAT DITEKAN!");
       isDispensing = false;
       stopPump();
       showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Tombol Stop Darurat Ditekan");
 
-      String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
-      mqttClient.publish(topicStatus.c_str(), "{\"status\":\"READY\",\"message\":\"Emergency Stopped\"}", true);
+      // Kirim event complete emergency stop ke Core 0
+      UIToNetMessage uiMsg;
+      memset(&uiMsg, 0, sizeof(uiMsg));
+      uiMsg.type = UI_MSG_COMPLETE;
+      uiMsg.dispensedMl = dispensedMilliLitres;
+      strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
+      strncpy(uiMsg.statusStr, "EMERGENCY_STOPPED", sizeof(uiMsg.statusStr) - 1);
 
-      String topicComplete = String("water/dispenser/") + DEVICE_ID + "/complete";
-      String completePayload = String("{\"status\":\"EMERGENCY_STOPPED\",\"dispensedMl\":") + String(dispensedMilliLitres) + 
-                               String(",\"transactionId\":\"") + currentTransactionId + "\"}";
-      mqttClient.publish(topicComplete.c_str(), completePayload.c_str());
-      delay(400);
+      if (qUIToNet != NULL) {
+        xQueueSend(qUIToNet, &uiMsg, 0);
+      }
       return;
     }
   }
@@ -188,12 +321,12 @@ void setup() {
   pinMode(PIN_TRIGGER_RESET_WIFI, INPUT_PULLUP);
   initPump();
 
-  // Inisialisasi Layar LCD TFT SPI ST7789
-  initDisplayDriver();
+  // Inisialisasi Antrean Pesan Antar-Core (FreeRTOS)
+  qNetToUI = xQueueCreate(10, sizeof(NetToUIMessage));
+  qUIToNet = xQueueCreate(10, sizeof(UIToNetMessage));
 
-  // Inisialisasi Touch Screen SPI XPT2046
-  ts.begin();
-  ts.setRotation(TFT_ROTATION); // Samakan rotasi dengan LCD agar koordinat pas
+  // Inisialisasi Layar LCD ST7789 & Touch Screen via TFT_eSPI (Termasuk Auto-Kalibrasi NVS)
+  initDisplayDriver();
 
   // Inisialisasi Tampilan Boot WiFi Awal
   showBootWifiScreen("", "", "Memulai Perangkat...");
@@ -201,27 +334,38 @@ void setup() {
   // Inisialisasi Model Debit Pompa Presisi (NVS Flash)
   initFlowCalculator();
 
-  // Inisialisasi WiFiManager Captive Portal
+  // Inisialisasi WiFiManager Captive Portal (Sinkron saat boot)
   setupWiFiManager();
 
   // Konfigurasi Klien MQTT Broker
   mqttClient.setServer(mqtt_broker, MQTT_PORT);
   mqttClient.setCallback(mqttCallback);
+
+  // Buat FreeRTOS Dedicated Task untuk Network & MQTT pada Core 0 (PRO_CPU)
+  xTaskCreatePinnedToCore(
+    networkTask,      // Fungsi task
+    "netTask",        // Nama task
+    8192,             // Ukuran Stack (8 KB)
+    NULL,             // Parameter
+    1,                // Prioritas
+    &netTaskHandle,   // Task Handle
+    0                 // Core ID 0
+  );
+
+  // Tampilkan layar menu utama (Standby)
+  showStandbyScreen();
 }
 
 // ==============================================================================
-// LOOP UTAMA (NON-BLOCKING STATE MACHINE)
+// LOOP UTAMA: DEDICATED UI & CONTROL TASK (BERJALAN DI CORE 1 APP_CPU)
 // ==============================================================================
 void loop() {
-  // 1. Pemeliharaan Koneksi MQTT
-  if (!mqttClient.connected()) {
-    reconnectMQTT();
-  }
-  mqttClient.loop();
+  // 1. Proses Pesan Masuk dari Core 0 (Event Jaringan & MQTT)
+  handleIncomingNetworkMessages();
 
   unsigned long currentMillis = millis();
 
-  // 2. Baca Input Sentuhan Layar Touch Screen
+  // 2. Baca Input Sentuhan Layar Touch Screen (High Priority, Zero-Lag)
   handleTouchScreen();
 
   // 3. Status 1: Proses Pengisian Air Sedang Berlangsung (Dispensing)
@@ -232,20 +376,23 @@ void loop() {
     // Perbarui Animasi Aliran Air & Angka Live di Layar LCD
     updateDispensingAnimation(dispensedMilliLitres, targetMilliLitres);
 
-    // Kirim Telemetri Pengisian ke Backend setiap 300 ms
+    // Kirim Telemetri Pengisian ke Core 0 setiap 300 ms
     if (currentMillis - lastTelemetryPublishTime >= 300) {
       lastTelemetryPublishTime = currentMillis;
 
       float flowRateLpm = (pumpFlowRateMlPerSec * 60.0f) / 1000.0f;
-      String topicTelemetry = String("water/dispenser/") + DEVICE_ID + "/telemetry";
-      String payload = String("{\"flowRate\":") + String(flowRateLpm, 2) + 
-                       String(",\"flowRateMlPerSec\":") + String(pumpFlowRateMlPerSec, 2) + 
-                       String(",\"dispensedMl\":") + String(dispensedMilliLitres) + 
-                       String(",\"targetMl\":") + String(targetMilliLitres) + 
-                       String(",\"status\":\"DISPENSING\"") + 
-                       String(",\"cutOffMode\":\"CALIBRATED_FLOW_TIMER\"") + 
-                       String(",\"transactionId\":\"") + currentTransactionId + "\"}";
-      mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
+      UIToNetMessage uiMsg;
+      memset(&uiMsg, 0, sizeof(uiMsg));
+      uiMsg.type = UI_MSG_TELEMETRY;
+      uiMsg.dispensedMl = dispensedMilliLitres;
+      uiMsg.targetMl = targetMilliLitres;
+      uiMsg.flowRateLpm = flowRateLpm;
+      uiMsg.flowRateMlPerSec = pumpFlowRateMlPerSec;
+      strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
+
+      if (qUIToNet != NULL) {
+        xQueueSend(qUIToNet, &uiMsg, 0);
+      }
     }
 
     // Evaluasi Syarat Otomatis Cut-Off Pompa
@@ -267,24 +414,35 @@ void loop() {
         showCompleteScreen("COMPLETED", dispensedMilliLitres, "Pengisian Selesai");
       }
 
-      String topicComplete = String("water/dispenser/") + DEVICE_ID + "/complete";
-      String completePayload = String("{\"status\":\"") + statusStr + "\"" + 
-                               String(",\"dispensedMl\":") + String(dispensedMilliLitres) + 
-                               String(",\"transactionId\":\"") + currentTransactionId + "\"}";
-      mqttClient.publish(topicComplete.c_str(), completePayload.c_str());
+      // Kirim event selesai ke Core 0
+      UIToNetMessage uiMsg;
+      memset(&uiMsg, 0, sizeof(uiMsg));
+      uiMsg.type = UI_MSG_COMPLETE;
+      uiMsg.dispensedMl = dispensedMilliLitres;
+      strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
+      strncpy(uiMsg.statusStr, statusStr.c_str(), sizeof(uiMsg.statusStr) - 1);
 
-      String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
-      mqttClient.publish(topicStatus.c_str(), "{\"status\":\"READY\"}", true);
+      if (qUIToNet != NULL) {
+        xQueueSend(qUIToNet, &uiMsg, 0);
+      }
     }
   }
 
-  // 4. Status 2: Sedang Menampilkan QRIS (Evaluasi Countdown 5 Menit)
+  // 4. Status 2: Sedang Menampilkan QRIS (Evaluasi Countdown 5 Menit = 300 Detik Penuh)
   else if (currentScreen == SCREEN_QRIS) {
+    if (qrisStartTime == 0) qrisStartTime = currentMillis;
+    if (qrisDurationSeconds < 60) qrisDurationSeconds = 300;
+
     unsigned long elapsedSec = (currentMillis - qrisStartTime) / 1000;
     if (elapsedSec >= qrisDurationSeconds) {
-      Serial.println("[QRIS] Batas waktu 5 menit tercapai! Membatalkan otomatis...");
-      String topicCancel = String("water/dispenser/") + DEVICE_ID + "/cancel";
-      mqttClient.publish(topicCancel.c_str(), "{\"status\":\"EXPIRED\"}");
+      Serial.printf("[QRIS] Batas waktu %lu detik tercapai! Membatalkan otomatis...\n", qrisDurationSeconds);
+      
+      UIToNetMessage uiMsg;
+      memset(&uiMsg, 0, sizeof(uiMsg));
+      uiMsg.type = UI_MSG_ORDER_CANCEL;
+      if (qUIToNet != NULL) {
+        xQueueSend(qUIToNet, &uiMsg, 0);
+      }
 
       showCompleteScreen("WAKTU_HABIS", 0, "Batas Waktu Pembayaran Habis");
     } else {
@@ -296,16 +454,17 @@ void loop() {
   else {
     checkAutoResetScreen();
 
-    // Kirim Heartbeat Telemetri setiap 1000 ms
+    // Kirim Heartbeat Status READY ke Core 0 setiap 1000 ms
     if (currentMillis - lastTelemetryPublishTime >= 1000) {
       lastTelemetryPublishTime = currentMillis;
 
-      String topicTelemetry = String("water/dispenser/") + DEVICE_ID + "/telemetry";
-      String payload = String("{\"status\":\"READY\"") + 
-                       String(",\"flowRateMlPerSec\":") + String(pumpFlowRateMlPerSec, 2) + 
-                       String(",\"cutOffMode\":\"CALIBRATED_FLOW_TIMER\"") + 
-                       String(",\"dispensedMl\":0,\"targetMl\":0,\"flowRate\":0.0}");
-      mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
+      UIToNetMessage uiMsg;
+      memset(&uiMsg, 0, sizeof(uiMsg));
+      uiMsg.type = UI_MSG_STATUS_READY;
+
+      if (qUIToNet != NULL) {
+        xQueueSend(qUIToNet, &uiMsg, 0);
+      }
     }
   }
 }

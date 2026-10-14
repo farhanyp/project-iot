@@ -1,7 +1,8 @@
 import mqtt from "mqtt";
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "../lib/prisma";
-import { createQrisTransaction } from "../lib/midtrans";
+import { createQrisTransaction, checkMidtransStatus } from "../lib/midtrans";
+import { processPaymentSettlement } from "../lib/payment-helper";
 
 const BROKER_URL = process.env.MQTT_BROKER_URL || "mqtt://localhost:1883";
 const WS_PORT = parseInt(process.env.WS_PORT || "3001", 10);
@@ -518,6 +519,46 @@ wss.on("connection", (ws) => {
     console.log(`[WS] Client disconnected. Remaining: ${wss.clients.size}`);
   });
 });
+
+// 5. Polling Otomatis Status Midtrans untuk Transaksi PENDING (Deteksi Pembayaran QRIS Real-Time)
+setInterval(async () => {
+  try {
+    const pendingTransactions = await prisma.transaction.findMany({
+      where: {
+        status: "PENDING",
+        createdAt: {
+          gte: new Date(Date.now() - 6 * 60 * 1000), // Transaksi dalam 6 menit terakhir
+        },
+      },
+      take: 5,
+    });
+
+    for (const tx of pendingTransactions) {
+      try {
+        const midtransResult = await checkMidtransStatus(tx.orderId);
+        if (midtransResult && midtransResult.isPaid) {
+          console.log(
+            `[IOT POLLER] Transaksi ${tx.orderId} terdeteksi LUNAS di Midtrans! Mengirim sinyal PAYMENT_SUCCESS...`
+          );
+          await processPaymentSettlement(
+            tx.orderId,
+            midtransResult.paymentType || "qris",
+            midtransResult.transactionStatus
+          );
+        } else if (midtransResult && midtransResult.isFailed) {
+          await prisma.transaction.update({
+            where: { id: tx.id },
+            data: { status: "CANCELLED" },
+          });
+        }
+      } catch {
+        // Abaikan error per order
+      }
+    }
+  } catch {
+    // Abaikan error polling
+  }
+}, 2500);
 
 const shutdown = () => {
   console.log("\n[GATEWAY] Shutting down IoT Gateway...");
