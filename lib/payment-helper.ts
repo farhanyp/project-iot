@@ -1,5 +1,5 @@
-import { prisma } from "@/lib/prisma";
-import { sendMqttCommand } from "@/lib/mqtt-sender";
+import { prisma } from "./prisma";
+import { sendMqttCommand } from "./mqtt-sender";
 
 export async function processPaymentSettlement(
   orderId: string,
