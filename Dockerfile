@@ -1,7 +1,7 @@
 # -------------------------------------------------------------
 # Multi-stage Dockerfile for Next.js Web Application
 # -------------------------------------------------------------
-FROM node:20-alpine AS base
+FROM node:22-alpine AS base
 
 # 1. Dependencies installation
 FROM base AS deps
@@ -22,6 +22,7 @@ ARG NEXT_PUBLIC_WS_URL
 ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
 ENV NEXT_TELEMETRY_DISABLED=1
 
+RUN mkdir -p public
 RUN npx prisma generate
 RUN npm run build
 
