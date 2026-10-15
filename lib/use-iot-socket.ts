@@ -80,14 +80,22 @@ export function useIoTSocket(customWsUrl?: string) {
   const isMountedRef = useRef(true);
   const connectRef = useRef<() => void>(() => {});
 
-  // Otomatis tentukan URL WebSocket berdasarkan host browser saat ini
+  // Otomatis tentukan URL WebSocket:
+  // 1. customWsUrl jika diberikan
+  // 2. NEXT_PUBLIC_WS_URL jika didefinisikan (misal wss://ws-water.domainanda.com)
+  // 3. Fallback cerdas berdasarkan window.location (wss:// jika https, ws:// jika http)
   const getResolvedWsUrl = useCallback(() => {
     if (customWsUrl) return customWsUrl;
-    if (typeof window !== "undefined") {
-      const host = window.location.hostname || "localhost";
-      return `ws://${host}:3001`;
+    if (process.env.NEXT_PUBLIC_WS_URL && process.env.NEXT_PUBLIC_WS_URL.trim() !== "") {
+      return process.env.NEXT_PUBLIC_WS_URL;
     }
-    return process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001";
+    if (typeof window !== "undefined") {
+      const isHttps = window.location.protocol === "https:";
+      const protocol = isHttps ? "wss:" : "ws:";
+      const host = window.location.hostname || "localhost";
+      return `${protocol}//${host}:3001`;
+    }
+    return "ws://localhost:3001";
   }, [customWsUrl]);
 
   const connect = useCallback(() => {

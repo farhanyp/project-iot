@@ -18,8 +18,6 @@ COPY server ./server/
 
 ENV NODE_ENV=production
 ENV WS_PORT=3001
-ENV MQTT_BROKER_URL="mqtt://mosquitto:1883"
-ENV DATABASE_URL="postgresql://postgres:postgres@postgres:5432/air_minum_db?schema=public"
 
 EXPOSE 3001
 
