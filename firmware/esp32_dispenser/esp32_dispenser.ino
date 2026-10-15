@@ -195,15 +195,19 @@ bool handleTouchScreen() {
 
     int maxCards = (totalPackages > 3) ? 3 : totalPackages;
 
-    // Pembagian zona sentuh diskrit tanpa overlap (32..85, 86..135, 136..188)
-    const int zoneYStart[3] = {32, 86, 136};
-    const int zoneYEnd[3]   = {85, 135, 188};
+    // Pembagian zona sentuh diskrit tanpa overlap (34..117, 118..199, 200..282)
+    // Sesuai dengan geometri kartu vertikal baru (Tinggi 76px + Gap 6px):
+    // Card 0: Y=38..114  -> Zona Sentuh: 34..117
+    // Card 1: Y=120..196 -> Zona Sentuh: 118..199
+    // Card 2: Y=202..278 -> Zona Sentuh: 200..282
+    const int zoneYStart[3] = {34, 118, 200};
+    const int zoneYEnd[3]   = {117, 199, 282};
 
     for (int i = 0; i < maxCards; i++) {
       int yStart = zoneYStart[i];
       int yEnd   = zoneYEnd[i];
 
-      // Deteksi sentuhan presisi pada seluruh lebar kartu (X: 6..234)
+      // Deteksi sentuhan presisi pada seluruh area kartu (X: 6..234)
       if (touchY >= yStart && touchY <= yEnd && touchX >= 6 && touchX <= 234) {
         lastMenuTapTime = millis();
         Serial.printf("[TOUCH PRECISE] Menu %d terpilih: %s (%d mL - Rp %ld) [Y=%d in %d..%d]\n",
@@ -212,14 +216,14 @@ bool handleTouchScreen() {
 
         beepOnce(70);
 
-        // Feedback visual tombol terpilih seketika
-        int cardDrawY = 38 + i * 50;
-        tft.drawRoundRect(10, cardDrawY, 220, 46, 6, TFT_GREEN);
-        tft.fillRoundRect(172, cardDrawY + 10, 50, 26, 4, TFT_GREEN);
-        tft.setTextColor(TFT_BLACK, TFT_GREEN);
+        // Feedback visual tombol terpilih seketika (menyorot pill button di bawah teks)
+        int cardDrawY = 38 + i * 82;
+        tft.drawRoundRect(8, cardDrawY, 224, 76, 6, WV_SUCCESS_GREEN);
+        tft.fillRoundRect(18, cardDrawY + 44, 202, 24, 4, WV_SUCCESS_GREEN);
+        tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
         tft.setTextSize(1);
-        tft.setCursor(182, cardDrawY + 19);
-        tft.print("OK!");
+        tft.setCursor(65, cardDrawY + 52);
+        tft.print("[ OK! PAKET TERPILIH ]");
 
         activePackageIndex = i;
         targetMilliLitres = dispenserPackages[i].volumeMl;
@@ -260,10 +264,10 @@ bool handleTouchScreen() {
       if (cancelPressStart == 0) {
         cancelPressStart = millis();
         // Beri feedback visual tombol ditekan
-        tft.fillRoundRect(8, 292, 224, 24, 4, TFT_RED);
-        tft.setTextColor(TFT_WHITE, TFT_RED);
+        tft.fillRoundRect(8, 290, 224, 26, 4, WV_TEXT_BLACK);
+        tft.setTextColor(WV_TEXT_WHITE, WV_TEXT_BLACK);
         tft.setTextSize(1);
-        tft.setCursor(65, 300);
+        tft.setCursor(62, 298);
         tft.print("[ MEMBATALKAN... ]");
         return false;
       }
@@ -290,12 +294,11 @@ bool handleTouchScreen() {
       if (cancelPressStart != 0) {
         cancelPressStart = 0;
         // Kembalikan tampilan tombol normal jika jari terlepas sebelum 200ms
-        tft.fillRoundRect(8, 292, 224, 24, 4, 0x3000);
-        tft.drawRoundRect(8, 292, 224, 24, 4, TFT_RED);
-        tft.setTextColor(TFT_WHITE, 0x3000);
+        tft.fillRoundRect(8, 290, 224, 26, 4, WV_DANGER_RED);
+        tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
         tft.setTextSize(1);
-        tft.setCursor(75, 300);
-        tft.print("[ BATALKAN ]");
+        tft.setCursor(68, 298);
+        tft.print("[ X  BATALKAN PESANAN ]");
       }
     }
   }
@@ -309,22 +312,22 @@ bool handleTouchScreen() {
       // Proteksi Keamanan: Cegah air tumpah jika tumbler belum diletakkan di bawah corong
       if (!isTumblerPresent) {
         Serial.println("[SAFETY] Tombol NEXT ditekan tapi tumbler belum terdeteksi di sensor!");
-        tft.fillRoundRect(10, 160, 220, 54, 8, TFT_RED);
-        tft.setTextColor(TFT_WHITE, TFT_RED);
+        tft.fillRoundRect(8, 160, 224, 54, 8, WV_DANGER_RED);
+        tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
         tft.setTextSize(2);
-        tft.setCursor(20, 176);
+        tft.setCursor(24, 176);
         tft.print("PASANG TUMBLER!");
         beepPattern(2);
         delay(600);
-        tft.fillRoundRect(10, 160, 220, 54, 8, TFT_GREEN);
-        tft.drawRoundRect(10, 160, 220, 54, 8, TFT_WHITE);
-        tft.setTextColor(TFT_BLACK, TFT_GREEN);
+        tft.fillRoundRect(8, 160, 224, 54, 8, WV_SUCCESS_GREEN);
+        tft.drawRoundRect(8, 160, 224, 54, 8, WV_HEADER_BG);
+        tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
         tft.setTextSize(2);
-        tft.setCursor(32, 172);
-        tft.print("LANJUT (NEXT) >");
+        tft.setCursor(24, 172);
+        tft.print("MULAI ISI AIR >");
         tft.setTextSize(1);
-        tft.setCursor(25, 196);
-        tft.print("Sentuh di sini untuk isi air");
+        tft.setCursor(28, 196);
+        tft.print("Sentuh di sini untuk mengalirkan air");
         return false;
       }
 
@@ -332,10 +335,10 @@ bool handleTouchScreen() {
       beepOnce(80);
 
       // Feedback visual seketika
-      tft.fillRoundRect(10, 160, 220, 54, 8, TFT_GREEN);
-      tft.setTextColor(TFT_BLACK, TFT_GREEN);
+      tft.fillRoundRect(8, 160, 224, 54, 8, WV_PRIMARY_BLUE);
+      tft.setTextColor(WV_TEXT_WHITE, WV_PRIMARY_BLUE);
       tft.setTextSize(2);
-      tft.setCursor(35, 176);
+      tft.setCursor(45, 176);
       tft.print("MEMULAI...");
 
       requiredDispenseDurationMs = calculateDispenseDurationMs(targetMilliLitres);
