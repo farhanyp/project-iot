@@ -93,9 +93,9 @@ export function useIoTSocket(customWsUrl?: string) {
       const isHttps = window.location.protocol === "https:";
       const protocol = isHttps ? "wss:" : "ws:";
       const host = window.location.hostname || "localhost";
-      return `${protocol}//${host}:3001`;
+      return `${protocol}//${host}:3002`;
     }
-    return "ws://localhost:3001";
+    return "ws://localhost:3002";
   }, [customWsUrl]);
 
   const connect = useCallback(() => {
