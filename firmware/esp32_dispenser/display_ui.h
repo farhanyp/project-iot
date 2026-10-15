@@ -47,9 +47,10 @@ inline void initTouchCalibration(bool forceRecalibrate = false) {
     int p1_samples = 0;
 
     while (millis() - waitStart < 10000) {
+      digitalWrite(TFT_CS, HIGH);
       if (ts.touched()) {
         TS_Point p = ts.getPoint();
-        if (p.z >= 70 && p.z <= 3800 && !(p.x == 0 && p.y == 0)) {
+        if (p.z >= 120 && p.z <= 3800 && !(p.x == 0 && p.y == 0)) {
           #if defined(TS_SWAP_XY) && TS_SWAP_XY
             p1_rawX += p.y;
             p1_rawY += p.x;
@@ -79,9 +80,10 @@ inline void initTouchCalibration(bool forceRecalibrate = false) {
     int p2_samples = 0;
 
     while (millis() - waitStart < 10000) {
+      digitalWrite(TFT_CS, HIGH);
       if (ts.touched()) {
         TS_Point p = ts.getPoint();
-        if (p.z >= 70 && p.z <= 3800 && !(p.x == 0 && p.y == 0)) {
+        if (p.z >= 120 && p.z <= 3800 && !(p.x == 0 && p.y == 0)) {
           #if defined(TS_SWAP_XY) && TS_SWAP_XY
             p2_rawX += p.y;
             p2_rawY += p.x;
@@ -183,24 +185,28 @@ inline void resetTouchCalibrationToDefault() {
   Serial.println("[TOUCH CAL] Memori NVS dihapus! Kalibrasi dikembalikan ke default fisik: X(500->3400), Y(3400->590)");
 }
 
-// Pembacaan sentuhan layar dengan Multi-Sampling 5-Titik & Median Filter (Zero-Jitter, Sekali Tekan Responsif)
+// Pembacaan sentuhan layar dengan Multi-Sampling 7-Titik, Warm-up Discard & Trimmed Median Filter (Presisi Tinggi & Bebas Jitter)
 inline bool getDisplayTouch(int &touchX, int &touchY) {
-  // 1. Pastikan Chip Select LCD tidak aktif saat membaca Touch Screen
+  // 1. Pastikan Chip Select LCD tidak aktif saat membaca Touch Screen pada bus SPI bersama
   digitalWrite(TFT_CS, HIGH);
 
   // 2. Baca hardware touch via SPI polling
   if (!ts.touched()) return false;
 
-  // 3. Multi-Sampling 5 sampel cepat untuk Median Filter (menghilangkan bounce/jitter sentuhan jari)
-  int samplesX[5];
-  int samplesY[5];
-  int samplesZ[5];
+  // Stabilisasi: baca 1 dummy sample untuk membuang contact bounce awal
+  ts.getPoint();
+
+  // 3. Multi-Sampling 7 sampel untuk Trimmed Median Filter
+  const int NUM_SAMPLES = 7;
+  int samplesX[NUM_SAMPLES];
+  int samplesY[NUM_SAMPLES];
+  int samplesZ[NUM_SAMPLES];
   int validCount = 0;
 
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < NUM_SAMPLES; i++) {
     TS_Point pt = ts.getPoint();
-    // Ambang tekanan empuk untuk jari manusia (70 s/d 3800)
-    if (pt.z >= 70 && pt.z <= 3800 && !(pt.x == 0 && pt.y == 0)) {
+    // Ambang tekanan mantap untuk jari manusia (120 s/d 3800) - menolak hovering noise
+    if (pt.z >= 120 && pt.z <= 3800 && !(pt.x == 0 && pt.y == 0)) {
       #if defined(TS_SWAP_XY) && TS_SWAP_XY
         samplesX[validCount] = pt.y;
         samplesY[validCount] = pt.x;
@@ -211,11 +217,11 @@ inline bool getDisplayTouch(int &touchX, int &touchY) {
       samplesZ[validCount] = pt.z;
       validCount++;
     }
-    delayMicroseconds(200); // Jeda singkat stabilisasi tegangan resistif
+    delayMicroseconds(150); // Jeda singkat stabilisasi tegangan resistif
   }
 
-  // Butuh minimal 3 sampel valid dari 5 sampel agar dianggap sentuhan stabil yang sah
-  if (validCount < 3) return false;
+  // Butuh minimal 4 sampel valid dari 7 sampel agar dianggap sentuhan mantap
+  if (validCount < 4) return false;
 
   // Urutkan sampel sederhana untuk mengambil nilai median (tengah)
   for (int i = 0; i < validCount - 1; i++) {

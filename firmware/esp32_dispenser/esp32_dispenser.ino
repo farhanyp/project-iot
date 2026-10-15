@@ -190,34 +190,41 @@ bool handleTouchScreen() {
   // KASUS 1: Di Layar Standby (Memilih Menu Paket Air)
   // ----------------------------------------------------------------------------
   if (currentScreen == SCREEN_STANDBY) {
-    int cardY = 38;
-    int cardH = 46;
-    int cardGap = 4;
+    static unsigned long lastMenuTapTime = 0;
+    if (millis() - lastMenuTapTime < 400) return false; // Debounce sentuhan antar-menu
+
     int maxCards = (totalPackages > 3) ? 3 : totalPackages;
 
+    // Pembagian zona sentuh diskrit tanpa overlap (32..85, 86..135, 136..188)
+    const int zoneYStart[3] = {32, 86, 136};
+    const int zoneYEnd[3]   = {85, 135, 188};
+
     for (int i = 0; i < maxCards; i++) {
-      int yStart = cardY + i * (cardH + cardGap);
-      int yEnd = yStart + cardH;
+      int yStart = zoneYStart[i];
+      int yEnd   = zoneYEnd[i];
 
-      // Area toleransi sentuhan kartu luas: +-8px vertikal dan selebar layar horizontal
-      if (touchY >= (yStart - 8) && touchY <= (yEnd + 8) && touchX >= 4 && touchX <= 236) {
-        Serial.printf("[TOUCH] Menu %d dipilih: %s (%d mL - Rp %ld)\n", 
-                      i + 1, dispenserPackages[i].name, dispenserPackages[i].volumeMl, dispenserPackages[i].price);
+      // Deteksi sentuhan presisi pada seluruh lebar kartu (X: 6..234)
+      if (touchY >= yStart && touchY <= yEnd && touchX >= 6 && touchX <= 234) {
+        lastMenuTapTime = millis();
+        Serial.printf("[TOUCH PRECISE] Menu %d terpilih: %s (%d mL - Rp %ld) [Y=%d in %d..%d]\n",
+                      i + 1, dispenserPackages[i].name, dispenserPackages[i].volumeMl, dispenserPackages[i].price,
+                      touchY, yStart, yEnd);
 
-        beepOnce(70); // Bip konfirmasi pilihan paket
+        beepOnce(70);
 
-        // 1. FEEDBACK VISUAL INSTAN (<1ms via TFT_eSPI)
-        tft.drawRoundRect(10, yStart, 220, cardH, 6, TFT_GREEN);
-        tft.fillRoundRect(172, yStart + 10, 50, 26, 4, TFT_GREEN);
+        // Feedback visual tombol terpilih seketika
+        int cardDrawY = 38 + i * 50;
+        tft.drawRoundRect(10, cardDrawY, 220, 46, 6, TFT_GREEN);
+        tft.fillRoundRect(172, cardDrawY + 10, 50, 26, 4, TFT_GREEN);
         tft.setTextColor(TFT_BLACK, TFT_GREEN);
         tft.setTextSize(1);
-        tft.setCursor(182, yStart + 19);
+        tft.setCursor(182, cardDrawY + 19);
         tft.print("OK!");
 
         activePackageIndex = i;
         targetMilliLitres = dispenserPackages[i].volumeMl;
 
-        // 2. Kirim pesan request pembuatan QRIS ke Core 0 melalui FreeRTOS Queue
+        // Kirim request transaksi baru ke Core 0 (Network MQTT)
         UIToNetMessage uiMsg;
         memset(&uiMsg, 0, sizeof(uiMsg));
         uiMsg.type = UI_MSG_ORDER_REQUEST;
@@ -230,12 +237,10 @@ bool handleTouchScreen() {
           xQueueSend(qUIToNet, &uiMsg, 0);
         }
 
-        // 3. Tampilkan layar QRIS (countdown 5 menit = 300 detik)
         char nomStr[16];
         snprintf(nomStr, sizeof(nomStr), "%ld", dispenserPackages[i].price);
         showQRISScreen(nomStr, "00020101021226600016ID.WATERVEND.WWW520458125303360540660005802ID5913WATERVEND IOT6007BANDUNG6304ABCD", 300);
 
-        // Kunci sentuhan 3 detik penuh agar jari pembeli tidak memicu tombol batal
         qrisIgnoreTouchUntil = millis() + 3000;
         return true;
       }
@@ -504,9 +509,45 @@ void handleSerialCommands() {
     beepPattern(3);
     resetWiFiSettings();
   }
-  // 9. Bantuan Command
+  // 9. Perintah FLOW:<angka> (Contoh: FLOW:25.0 atau FLOW:30.0)
+  else if (cmd.startsWith("FLOW:") || cmd.startsWith("flow:")) {
+    String valStr = cmd.substring(5);
+    valStr.trim();
+    float newRate = valStr.toFloat();
+    if (newRate >= 5.0f && newRate <= 100.0f) {
+      savePumpFlowRate(newRate);
+      beepOnce(80);
+      float lpm = (pumpFlowRateMlPerSec * 60.0f) / 1000.0f;
+      Serial.println("==================================================");
+      Serial.printf(">> [OK] Debit Pompa Diperbarui: %.1f mL/detik (~%.2f Liter/menit)\n", pumpFlowRateMlPerSec, lpm);
+      Serial.println("   Artinya:");
+      Serial.printf("   - Untuk 100 mL   : butuh waktu sekitar %.1f detik\n", 100.0f / pumpFlowRateMlPerSec);
+      Serial.printf("   - Untuk 250 mL   : butuh waktu sekitar %.1f detik\n", 250.0f / pumpFlowRateMlPerSec);
+      Serial.printf("   - Untuk 600 mL   : butuh waktu sekitar %.1f detik\n", 600.0f / pumpFlowRateMlPerSec);
+      Serial.printf("   - Untuk 1.500 mL : butuh waktu sekitar %.1f detik\n", 1500.0f / pumpFlowRateMlPerSec);
+      Serial.println("==================================================");
+    } else {
+      Serial.println(">> [ERROR] Nilai debit tidak valid! Masukkan antara 5.0 s/d 100.0 mL/detik (Contoh: FLOW:25.0)");
+    }
+  }
+  // 10. Perintah FLOW? (Cek Debit Live & Estimasi Waktu)
+  else if (cmd.equalsIgnoreCase("FLOW?") || cmd.equalsIgnoreCase("DEBIT?")) {
+    float lpm = (pumpFlowRateMlPerSec * 60.0f) / 1000.0f;
+    Serial.println("==================================================");
+    Serial.printf(">> STATUS KALIBRASI DEBIT POMPA AIR:\n");
+    Serial.printf("   - Debit Pompa : %.1f mL/detik (~%.2f Liter/menit)\n", pumpFlowRateMlPerSec, lpm);
+    Serial.println("   Artinya:");
+    Serial.printf("   - Untuk 100 mL   : butuh waktu sekitar %.1f detik\n", 100.0f / pumpFlowRateMlPerSec);
+    Serial.printf("   - Untuk 250 mL   : butuh waktu sekitar %.1f detik\n", 250.0f / pumpFlowRateMlPerSec);
+    Serial.printf("   - Untuk 600 mL   : butuh waktu sekitar %.1f detik\n", 600.0f / pumpFlowRateMlPerSec);
+    Serial.printf("   - Untuk 1.500 mL : butuh waktu sekitar %.1f detik\n", 1500.0f / pumpFlowRateMlPerSec);
+    Serial.println("==================================================");
+  }
+  // 11. Bantuan Command
   else if (cmd.equalsIgnoreCase("HELP") || cmd.equalsIgnoreCase("?")) {
     Serial.println(">> PERINTAH SERIAL TERSEDIA:");
+    Serial.println("   - FLOW:<rate> : Atur debit pompa dinamis (Contoh: FLOW:25.0 atau FLOW:30.0)");
+    Serial.println("   - FLOW?       : Cek debit saat ini & tabel simulasi waktu pengisian");
     Serial.println("   - WIFI:RESET  : Hapus Wi-Fi tersimpan & buka hotspot WaterVend-Setup");
     Serial.println("   - DIST:<cm>   : Atur target jarak dinamis (Contoh: DIST:12.0)");
     Serial.println("   - DIST?       : Cek jarak live saat ini & status tumbler");
@@ -632,7 +673,11 @@ void loop() {
       memset(&uiMsg, 0, sizeof(uiMsg));
       uiMsg.type = UI_MSG_COMPLETE;
       uiMsg.dispensedMl = dispensedMilliLitres;
-      strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
+      String txIdToSend = currentTransactionId;
+      if (txIdToSend.length() == 0 && strlen(activeOrderId) > 0) {
+        txIdToSend = String(activeOrderId);
+      }
+      strncpy(uiMsg.orderId, txIdToSend.c_str(), sizeof(uiMsg.orderId) - 1);
       strncpy(uiMsg.statusStr, statusStr.c_str(), sizeof(uiMsg.statusStr) - 1);
 
       if (qUIToNet != NULL) {

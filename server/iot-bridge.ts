@@ -373,28 +373,87 @@ mqttClient.on("message", async (topic, message) => {
             lastPingAt: new Date(),
           },
         });
-      } else if (eventType === "telemetry" && payload.transactionId) {
-        // Update volume terisi secara berkala pada transaksi aktif
+      } else if (eventType === "telemetry" && (payload.transactionId || payload.orderId)) {
+        const txIdentifier = payload.orderId || payload.transactionId;
+        // Update volume terisi secara berkala pada transaksi aktif & pastikan status DISPENSING
         await prisma.transaction.updateMany({
           where: {
-            id: payload.transactionId,
+            OR: [
+              { orderId: String(txIdentifier) },
+              { id: String(txIdentifier) },
+            ],
+            status: { in: ["PAID", "DISPENSING"] },
+          },
+          data: {
             status: "DISPENSING",
-          },
-          data: {
-            dispensedMl: payload.dispensedMl || 0,
+            ...(payload.dispensedMl !== undefined ? { dispensedMl: Number(payload.dispensedMl) || 0 } : {}),
           },
         });
-      } else if (eventType === "complete" && payload.transactionId) {
-        // Transaksi selesai
-        await prisma.transaction.update({
-          where: { id: payload.transactionId },
-          data: {
-            status: "COMPLETED",
-            dispensedMl: payload.dispensedMl,
-            completedAt: new Date(),
-          },
+      } else if (eventType === "complete") {
+        const txIdentifier = payload.orderId || payload.transactionId;
+        const dispensed = Number(payload.dispensedMl) || 0;
+        console.log(`[MQTT COMPLETE EVENT for ${deviceCode}]:`, payload);
+
+        let targetTx = null;
+        if (txIdentifier) {
+          targetTx = await prisma.transaction.findFirst({
+            where: {
+              OR: [
+                { orderId: String(txIdentifier) },
+                { id: String(txIdentifier) },
+              ],
+            },
+          });
+        }
+
+        // Fallback jika txIdentifier kosong atau tidak cocok, cari transaksi aktif terakhir di dispenser ini
+        if (!targetTx) {
+          const dev = await prisma.device.findUnique({ where: { code: deviceCode } });
+          if (dev) {
+            targetTx = await prisma.transaction.findFirst({
+              where: {
+                deviceId: dev.id,
+                status: { in: ["PAID", "DISPENSING", "PENDING"] },
+              },
+              orderBy: { createdAt: "desc" },
+            });
+          }
+        }
+
+        if (targetTx) {
+          const finalDispensed = dispensed > 0 ? dispensed : targetTx.volumeMl;
+          const updatedTx = await prisma.transaction.update({
+            where: { id: targetTx.id },
+            data: {
+              status: "COMPLETED",
+              dispensedMl: finalDispensed,
+              completedAt: new Date(),
+            },
+          });
+          console.log(`[DB SUCCESS] Transaksi ${updatedTx.orderId} (${updatedTx.id}) status berhasil diperbarui menjadi COMPLETED (${updatedTx.dispensedMl} mL).`);
+
+          // Catat ke Log Aktivitas
+          await prisma.activityLog.create({
+            data: {
+              level: "INFO",
+              action: "DISPENSE_COMPLETED",
+              message: `Pengisian air selesai (${finalDispensed} mL). Status transaksi COMPLETED.`,
+              deviceId: targetTx.deviceId,
+              metadata: {
+                orderId: targetTx.orderId,
+                dispensedMl: finalDispensed,
+                deviceCode,
+              },
+            },
+          }).catch(() => {});
+        } else {
+          console.warn(`[DB WARN] Transaksi tidak ditemukan untuk event complete pada ${deviceCode} (txIdentifier: ${txIdentifier})`);
+        }
+
+        await prisma.device.updateMany({
+          where: { code: deviceCode },
+          data: { status: "READY" },
         });
-        console.log(`[DB] Transaction ${payload.transactionId} marked as COMPLETED.`);
       }
     } catch (dbErr) {
       // Catch DB errors agar tidak memutus aliran real-time jika database sedang booting

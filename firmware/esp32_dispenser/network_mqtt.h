@@ -45,33 +45,51 @@ inline void parsePackagesFromJson(const String& json) {
   int searchPos = 0;
   int count = 0;
 
+  // Cari posisi array "packages": [ ... ]
+  int packagesKeyIdx = json.indexOf("\"packages\"");
+  if (packagesKeyIdx >= 0) {
+    int arrayStart = json.indexOf("[", packagesKeyIdx);
+    if (arrayStart >= 0) {
+      searchPos = arrayStart + 1;
+    }
+  }
+
   while (count < MAX_PACKAGES) {
-    int nameIdx = json.indexOf("\"name\"", searchPos);
-    if (nameIdx < 0) break;
+    int objStart = json.indexOf('{', searchPos);
+    if (objStart < 0) break;
+    int objEnd = json.indexOf('}', objStart);
+    if (objEnd < 0) break;
 
-    int volIdx = json.indexOf("\"volumeMl\"", searchPos);
-    int priceIdx = json.indexOf("\"price\"", searchPos);
-    int idIdx = json.indexOf("\"id\"", searchPos);
+    // Ekstrak objek JSON tunggal: { ... }
+    String itemJson = json.substring(objStart, objEnd + 1);
 
-    String nameVal = extractJsonValue(json.substring(nameIdx - 1), "name");
-    String volVal = extractJsonValue(json.substring(volIdx - 1), "volumeMl");
-    String priceVal = extractJsonValue(json.substring(priceIdx - 1), "price");
-    String idVal = (idIdx >= 0) ? extractJsonValue(json.substring(idIdx - 1), "id") : String(count);
+    String nameVal = extractJsonValue(itemJson, "name");
+    String volVal = extractJsonValue(itemJson, "volumeMl");
+    String priceVal = extractJsonValue(itemJson, "price");
+    String idVal = extractJsonValue(itemJson, "id");
+    if (idVal.length() == 0) idVal = String(count + 1);
 
     if (nameVal.length() > 0 && volVal.length() > 0 && priceVal.length() > 0) {
       strncpy(dispenserPackages[count].id, idVal.c_str(), sizeof(dispenserPackages[count].id) - 1);
+      dispenserPackages[count].id[sizeof(dispenserPackages[count].id) - 1] = '\0';
+
       strncpy(dispenserPackages[count].name, nameVal.c_str(), sizeof(dispenserPackages[count].name) - 1);
+      dispenserPackages[count].name[sizeof(dispenserPackages[count].name) - 1] = '\0';
+
       dispenserPackages[count].volumeMl = volVal.toInt();
       dispenserPackages[count].price = priceVal.toInt();
+
+      Serial.printf("[PACKAGES] Paket %d dimuat: %s | %d mL | Rp %ld\n",
+                    count + 1, dispenserPackages[count].name, dispenserPackages[count].volumeMl, dispenserPackages[count].price);
       count++;
     }
 
-    searchPos = nameIdx + 8;
+    searchPos = objEnd + 1;
   }
 
   if (count > 0) {
     totalPackages = count;
-    Serial.printf("[PACKAGES] Berhasil memuat %d paket dari backend web!\n", totalPackages);
+    Serial.printf("[PACKAGES] Total %d paket menu berhasil disinkronisasi dari database web!\n", totalPackages);
     
     // Kirim notifikasi ke UI Task (Core 1)
     NetToUIMessage netMsg;
@@ -82,6 +100,7 @@ inline void parsePackagesFromJson(const String& json) {
     }
   }
 }
+
 
 // Helper untuk menghapus kredensial Wi-Fi & membuka portal konfigurasi
 inline void resetWiFiSettings() {
@@ -279,6 +298,16 @@ inline void mqttCallback(char* topic, byte* message, unsigned int length) {
       String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
       String payload = String("{\"status\":\"READY\",\"flowRateMlPerSec\":") + String(pumpFlowRateMlPerSec, 2) + "}";
       mqttClient.publish(topicStatus.c_str(), payload.c_str(), true);
+
+      float lpm = (pumpFlowRateMlPerSec * 60.0f) / 1000.0f;
+      Serial.println("==================================================");
+      Serial.printf(">> [MQTT] Debit Pompa Diperbarui: %.1f mL/detik (~%.2f Liter/menit)\n", pumpFlowRateMlPerSec, lpm);
+      Serial.println("   Artinya:");
+      Serial.printf("   - Untuk 100 mL   : butuh waktu sekitar %.1f detik\n", 100.0f / pumpFlowRateMlPerSec);
+      Serial.printf("   - Untuk 250 mL   : butuh waktu sekitar %.1f detik\n", 250.0f / pumpFlowRateMlPerSec);
+      Serial.printf("   - Untuk 600 mL   : butuh waktu sekitar %.1f detik\n", 600.0f / pumpFlowRateMlPerSec);
+      Serial.printf("   - Untuk 1.500 mL : butuh waktu sekitar %.1f detik\n", 1500.0f / pumpFlowRateMlPerSec);
+      Serial.println("==================================================");
     }
   }
 
@@ -296,6 +325,17 @@ inline void mqttCallback(char* topic, byte* message, unsigned int length) {
         String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
         String payload = String("{\"status\":\"READY\",\"flowRateMlPerSec\":") + String(pumpFlowRateMlPerSec, 2) + "}";
         mqttClient.publish(topicStatus.c_str(), payload.c_str(), true);
+
+        float lpm = (pumpFlowRateMlPerSec * 60.0f) / 1000.0f;
+        Serial.println("==================================================");
+        Serial.printf(">> [MQTT KALIBRASI] Target: %.0f mL | Riil: %.0f mL -> Debit Baru: %.1f mL/detik (~%.2f L/menit)\n",
+                      target, measured, pumpFlowRateMlPerSec, lpm);
+        Serial.println("   Artinya:");
+        Serial.printf("   - Untuk 100 mL   : butuh waktu sekitar %.1f detik\n", 100.0f / pumpFlowRateMlPerSec);
+        Serial.printf("   - Untuk 250 mL   : butuh waktu sekitar %.1f detik\n", 250.0f / pumpFlowRateMlPerSec);
+        Serial.printf("   - Untuk 600 mL   : butuh waktu sekitar %.1f detik\n", 600.0f / pumpFlowRateMlPerSec);
+        Serial.printf("   - Untuk 1.500 mL : butuh waktu sekitar %.1f detik\n", 1500.0f / pumpFlowRateMlPerSec);
+        Serial.println("==================================================");
       }
     }
   }
@@ -406,12 +446,13 @@ inline void processOutgoingUIMessages() {
       String topicComplete = String("water/dispenser/") + DEVICE_ID + "/complete";
       String completePayload = String("{\"status\":\"") + String(uiMsg.statusStr) + "\"" + 
                                String(",\"dispensedMl\":") + String(uiMsg.dispensedMl) + 
+                               String(",\"orderId\":\"") + String(uiMsg.orderId) + "\"" +
                                String(",\"transactionId\":\"") + String(uiMsg.orderId) + "\"}";
       mqttClient.publish(topicComplete.c_str(), completePayload.c_str());
 
       String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
       mqttClient.publish(topicStatus.c_str(), "{\"status\":\"READY\"}", true);
-      Serial.printf("[MQTT Core 0] Selesai pengisian terkirim: %s (%lu mL)\n", uiMsg.statusStr, uiMsg.dispensedMl);
+      Serial.printf("[MQTT Core 0] Selesai pengisian terkirim: %s (%lu mL, Order: %s)\n", uiMsg.statusStr, uiMsg.dispensedMl, uiMsg.orderId);
     }
     else if (uiMsg.type == UI_MSG_STATUS_READY) {
       String topicTelemetry = String("water/dispenser/") + DEVICE_ID + "/telemetry";

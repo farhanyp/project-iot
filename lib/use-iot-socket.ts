@@ -4,7 +4,8 @@ import { useEffect, useRef, useState, useCallback } from "react";
 
 export interface TelemetryData {
   deviceId: string;
-  flowRate: number;
+  flowRate: number; // L/min
+  flowRateMlPerSec?: number; // mL/s
   dispensedMl: number;
   targetMl: number;
   pulseCount?: number;
@@ -41,6 +42,9 @@ export interface IoTEvent {
 
 export interface CommandOptions {
   volumeMl?: number;
+  flowRate?: number;
+  targetMl?: number;
+  measuredMl?: number;
   knownWeight?: number;
   factor?: number;
   maxWeight?: number;
@@ -58,7 +62,8 @@ export function useIoTSocket(customWsUrl?: string) {
   const [deviceStatus, setDeviceStatus] = useState<"READY" | "DISPENSING" | "OFFLINE">("OFFLINE");
   const [telemetry, setTelemetry] = useState<TelemetryData>({
     deviceId: "DISPENSER-01",
-    flowRate: 0,
+    flowRate: 1.5,
+    flowRateMlPerSec: 25.0,
     dispensedMl: 0,
     targetMl: 0,
     currentWeight: 0,
@@ -366,6 +371,27 @@ export function useIoTSocket(customWsUrl?: string) {
     [sendCommand]
   );
 
+  // Helper function untuk Menetapkan Debit Pompa Dinamis (mL/detik)
+  const sendSetFlowRate = useCallback(
+    (flowRate: number, deviceId = "DISPENSER-01") => {
+      setTelemetry((prev) => ({
+        ...prev,
+        flowRateMlPerSec: flowRate,
+        flowRate: (flowRate * 60) / 1000,
+      }));
+      return sendCommand("SET_FLOW_RATE", { flowRate, deviceId });
+    },
+    [sendCommand]
+  );
+
+  // Helper function untuk Kalibrasi Debit Berdasarkan Takaran Riil (Gelas Ukur)
+  const sendCalibratePump = useCallback(
+    (targetMl: number, measuredMl: number, deviceId = "DISPENSER-01") => {
+      return sendCommand("CALIBRATE_PUMP", { targetMl, measuredMl, deviceId });
+    },
+    [sendCommand]
+  );
+
   return {
     isConnected,
     mqttConnected,
@@ -382,5 +408,7 @@ export function useIoTSocket(customWsUrl?: string) {
     sendResetSensor,
     sendSetProximityConfig,
     sendTestBuzzer,
+    sendSetFlowRate,
+    sendCalibratePump,
   };
 }
