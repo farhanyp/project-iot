@@ -83,6 +83,15 @@ inline void parsePackagesFromJson(const String& json) {
   }
 }
 
+// Helper untuk menghapus kredensial Wi-Fi & membuka portal konfigurasi
+inline void resetWiFiSettings() {
+  Serial.println("\n[WIFI RESET] Menghapus data Wi-Fi tersimpan & merestart ESP32...");
+  WiFiManager wm;
+  wm.resetSettings();
+  delay(1000);
+  ESP.restart();
+}
+
 // Inisialisasi WiFiManager dengan Captive Portal
 inline void setupWiFiManager() {
   preferences.begin("watervend", false);
@@ -229,6 +238,11 @@ inline void mqttCallback(char* topic, byte* message, unsigned int length) {
     strncpy(netMsg.nominal, nominal.c_str(), sizeof(netMsg.nominal) - 1);
     strncpy(netMsg.qrPayload, qris.c_str(), sizeof(netMsg.qrPayload) - 1);
     netMsg.timeoutSeconds = durSec;
+    String txId = extractJsonValue(messageStr, "orderId");
+    if (txId.length() == 0) {
+      txId = extractJsonValue(messageStr, "transactionId");
+    }
+    strncpy(netMsg.orderId, txId.c_str(), sizeof(netMsg.orderId) - 1);
 
     if (qNetToUI != NULL) {
       xQueueSend(qNetToUI, &netMsg, 0);
@@ -368,8 +382,9 @@ inline void processOutgoingUIMessages() {
     }
     else if (uiMsg.type == UI_MSG_ORDER_CANCEL) {
       String topicCancel = String("water/dispenser/") + DEVICE_ID + "/cancel";
-      mqttClient.publish(topicCancel.c_str(), "{\"status\":\"CANCELLED\"}");
-      Serial.println("[MQTT Core 0] Order cancel terkirim ke backend.");
+      String cancelPayload = String("{\"status\":\"CANCELLED\",\"orderId\":\"") + String(uiMsg.orderId) + "\"}";
+      mqttClient.publish(topicCancel.c_str(), cancelPayload.c_str());
+      Serial.printf("[MQTT Core 0] Order cancel terkirim ke backend (Order: %s).\n", uiMsg.orderId);
     }
     else if (uiMsg.type == UI_MSG_TELEMETRY) {
       String topicTelemetry = String("water/dispenser/") + DEVICE_ID + "/telemetry";
@@ -384,7 +399,7 @@ inline void processOutgoingUIMessages() {
                        String(",\"buzzerAlarmEnabled\":") + (isBuzzerAlarmEnabled ? "true" : "false") + 
                        String(",\"isBuzzerSounding\":") + (isBuzzerSounding ? "true" : "false") + 
                        String(",\"targetDistanceCm\":") + String(targetDistanceCm, 1) + 
-                       String(",\"rawSensorSignal\":") + String(digitalRead(PIN_PROXIMITY_SENSOR)) + "}";
+                       String(",\"currentDistanceCm\":") + String(currentMeasuredDistanceCm, 1) + "}";
       mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
     }
     else if (uiMsg.type == UI_MSG_COMPLETE) {
@@ -408,7 +423,7 @@ inline void processOutgoingUIMessages() {
                        String(",\"buzzerAlarmEnabled\":") + (isBuzzerAlarmEnabled ? "true" : "false") + 
                        String(",\"isBuzzerSounding\":") + (isBuzzerSounding ? "true" : "false") + 
                        String(",\"targetDistanceCm\":") + String(targetDistanceCm, 1) + 
-                       String(",\"rawSensorSignal\":") + String(digitalRead(PIN_PROXIMITY_SENSOR)) + "}";
+                       String(",\"currentDistanceCm\":") + String(currentMeasuredDistanceCm, 1) + "}";
       mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
     }
   }

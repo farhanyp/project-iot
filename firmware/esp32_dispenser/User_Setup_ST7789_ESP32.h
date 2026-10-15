@@ -34,7 +34,9 @@
 #define TFT_RST  15  // Reset LCD (GPIO 15)
 
 // Pin Kontrol Khusus Touch Screen XPT2046
-#define TOUCH_CS 21  // T_CS pada modul touch (GPIO 21)
+// CATATAN: Wajib dikomentari jika menggunakan library eksternal XPT2046_Touchscreen
+// agar TFT_eSPI tidak mengontrol GPIO 21 dan tidak menimbulkan konflik bus SPI!
+// #define TOUCH_CS 21
 
 // 4. DAFTAR FONT YANG DIAKTIFKAN
 #define LOAD_GLCD   // Font standar 8-pixel

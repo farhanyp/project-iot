@@ -27,6 +27,28 @@ export default function AdminDashboardPage() {
   const [transactions, setTransactions] = useState<TransactionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [simulatingId, setSimulatingId] = useState<string | null>(null);
+
+  const handleSimulatePay = async (orderId: string) => {
+    setSimulatingId(orderId);
+    try {
+      const res = await fetch("/api/payment/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        fetchStats();
+      } else {
+        alert(data.error || "Gagal simulasi pembayaran.");
+      }
+    } catch {
+      alert("Terjadi error koneksi saat simulasi.");
+    } finally {
+      setSimulatingId(null);
+    }
+  };
 
   const fetchStats = useCallback(async () => {
     try {
@@ -213,6 +235,17 @@ export default function AdminDashboardPage() {
                       <span className={`inline-block px-2.5 py-0.5 rounded-full text-[11px] font-semibold border ${getStatusBadge(tx.status)}`}>
                         {tx.status}
                       </span>
+                      {tx.status === "PENDING" && (
+                        <button
+                          type="button"
+                          onClick={() => handleSimulatePay(tx.orderId)}
+                          disabled={simulatingId === tx.orderId}
+                          className="mt-1 block mx-auto px-2 py-0.5 text-[10px] bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded font-medium shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+                          title="Simulasikan pembayaran lunas untuk pengujian development"
+                        >
+                          {simulatingId === tx.orderId ? "Memproses..." : "⚡ Simulasi Lunas"}
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))

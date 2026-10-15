@@ -15,8 +15,7 @@ export default function SensorTestPage() {
     sendTestBuzzer,
   } = useIoTSocket();
 
-  const [targetDistance, setTargetDistance] = useState<number>(8.0);
-  const [activeHigh, setActiveHigh] = useState<boolean>(true);
+  const [targetDistance, setTargetDistance] = useState<number>(12.0);
   const [feedback, setFeedback] = useState<string | null>(null);
 
   // Sinkronisasi targetDistance saat menerima telemetri dari ESP32
@@ -32,13 +31,14 @@ export default function SensorTestPage() {
   };
 
   const handleSaveConfig = () => {
-    sendSetProximityConfig(targetDistance, activeHigh);
-    showFeedback(`Pengaturan tersimpan ke ESP32: Target ${targetDistance} cm (${activeHigh ? "PNP Active HIGH" : "NPN Active LOW"})`);
+    sendSetProximityConfig(targetDistance, true);
+    showFeedback(`Target jarak baru tersimpan ke NVS Flash ESP32: <= ${targetDistance.toFixed(1)} cm`);
   };
 
   const isTumblerIn = !!telemetry.isTumblerPresent;
   const isAlarmOn = telemetry.buzzerAlarmEnabled !== false;
   const isBeeping = !!telemetry.isBuzzerSounding;
+  const liveDist = telemetry.currentDistanceCm !== undefined ? telemetry.currentDistanceCm : null;
 
   return (
     <div className="space-y-6">
@@ -46,10 +46,10 @@ export default function SensorTestPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-            Uji Sensor E18-B03P1 & Buzzer
+            Uji Sensor Ultrasonik HC-SR04 & Buzzer
           </h1>
           <p className="text-sm text-slate-500">
-            Diagnostik sinyal optik tumbler, kontrol alarm bunyi di luar jangkauan, dan kalibrasi jarak (cm)
+            Diagnostik jarak fisik tumbler, kontrol alarm bunyi saat wadah kosong, dan kalibrasi jarak dinamis (cm)
           </p>
         </div>
 
@@ -81,7 +81,7 @@ export default function SensorTestPage() {
 
       {/* Baris Status Utama: Status Deteksi Tumbler & Buzzer */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {/* Card 1: Status Sensor E18 */}
+        {/* Card 1: Status Sensor Ultrasonik HC-SR04 */}
         <div className={`p-6 rounded-2xl border transition-all ${
           isTumblerIn
             ? "bg-emerald-50/80 border-emerald-300 shadow-emerald-100 shadow-md"
@@ -90,7 +90,7 @@ export default function SensorTestPage() {
           <div className="flex items-start justify-between">
             <div>
               <span className="text-xs uppercase font-bold tracking-wider text-slate-500">
-                Deteksi Sensor E18-B03P1
+                Deteksi Sensor HC-SR04 (Ultrasonik)
               </span>
               <h2 className={`text-2xl font-extrabold mt-1 ${isTumblerIn ? "text-emerald-800" : "text-red-800"}`}>
                 {isTumblerIn ? "Wadah Masuk Jangkauan" : "Di Luar Jangkauan"}
@@ -105,40 +105,24 @@ export default function SensorTestPage() {
 
           <div className="mt-4 pt-3 border-t border-slate-200/60 grid grid-cols-2 gap-2 text-xs font-mono text-slate-700">
             <div className="bg-white/80 p-2.5 rounded-xl border border-slate-200">
-              <span className="text-[10px] text-slate-400 block uppercase font-sans font-semibold">Sinyal Pin GPIO 26</span>
+              <span className="text-[10px] text-slate-400 block uppercase font-sans font-semibold">Jarak Terukur Live</span>
               <span className="text-lg font-bold text-slate-900 flex items-center gap-1.5 mt-0.5">
-                <span className={`w-2.5 h-2.5 rounded-full ${telemetry.rawSensorSignal === 1 ? "bg-amber-500" : "bg-slate-400"}`} />
-                {telemetry.rawSensorSignal !== undefined ? (
-                  telemetry.rawSensorSignal === 1 ? "1 (HIGH)" : "0 (LOW)"
-                ) : (isTumblerIn ? "1 (HIGH)" : "0 (LOW)")}
+                <span className={`w-2.5 h-2.5 rounded-full ${isTumblerIn ? "bg-emerald-500" : "bg-red-500"}`} />
+                {liveDist !== null ? `${liveDist.toFixed(1)} cm` : "Membaca..."}
               </span>
             </div>
             <div className="bg-white/80 p-2.5 rounded-xl border border-slate-200">
-              <span className="text-[10px] text-slate-400 block uppercase font-sans font-semibold">Mode Polaritas</span>
-              <span className="text-xs font-bold text-blue-700 block mt-1">
-                {activeHigh ? "PNP (1 = Ada)" : "NPN (0 = Ada)"}
+              <span className="text-[10px] text-slate-400 block uppercase font-sans font-semibold">Target Batas Maks</span>
+              <span className="text-lg font-bold text-blue-700 block mt-0.5">
+                &le; {targetDistance.toFixed(1)} cm
               </span>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              const newActiveHigh = !activeHigh;
-              setActiveHigh(newActiveHigh);
-              sendSetProximityConfig(targetDistance, newActiveHigh);
-              showFeedback(`Logika sensor dibalik menjadi: ${newActiveHigh ? "PNP (Active HIGH)" : "NPN (Active LOW)"}`);
-            }}
-            className="mt-3 w-full py-2 px-3 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold text-slate-800 cursor-pointer transition-colors flex items-center justify-center gap-1.5 shadow-2xs"
-          >
-            <span>🔁</span>
-            <span>Sinyal Terbalik? Balik Logika ({activeHigh ? "Ganti ke NPN LOW" : "Ganti ke PNP HIGH"})</span>
-          </button>
-
-          <p className="text-xs text-slate-600 mt-2">
+          <p className="text-xs text-slate-600 mt-3">
             {isTumblerIn
-              ? "✓ Tumbler terdeteksi di depan sensor. Buzzer otomatis senyap (atau bip konfirmasi)."
-              : "✕ Wadah tidak terdeteksi. Buzzer membunyikan alarm jika mode ON diaktifkan."}
+              ? "✓ Wadah terdeteksi dalam jarak jangkauan. Buzzer otomatis senyap (mati)."
+              : "✕ Wadah tidak terdeteksi (kosong). Buzzer berbunyi alarm peringatan saat mode aktif."}
           </p>
         </div>
 
@@ -156,7 +140,7 @@ export default function SensorTestPage() {
                 Status Suara Buzzer (GPIO 27)
               </span>
               <h2 className="text-2xl font-extrabold mt-1 text-slate-900">
-                {isAlarmOn ? (isBeeping ? "🔊 ALARM BERBUNYI" : "🔇 SENYAP (DALAM JANGKAUAN)") : "⏸️ MODE SENYAP (OFF)"}
+                {isAlarmOn ? (isBeeping ? "🔊 ALARM BERBUNYI" : "🔇 SENYAP (WADAH ADA)") : "⏸️ MODE SENYAP (OFF)"}
               </h2>
             </div>
             <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-2xl border ${
@@ -179,8 +163,8 @@ export default function SensorTestPage() {
 
           <p className="text-xs text-slate-600 mt-2">
             {isAlarmOn
-              ? "Sistem memantau sensor secara aktif: bunyi saat wadah kosong, diam saat wadah ditaruh."
-              : "Fitur alarm dibisukan. Buzzer tidak akan berbunyi otomatis."}
+              ? "Sistem memantau ultrasonik secara aktif: berbunyi jika wadah kosong, langsung senyap saat wadah diletakkan."
+              : "Fitur alarm dibisukan. Buzzer tidak akan berbunyi otomatis saat wadah kosong."}
           </p>
         </div>
       </div>
@@ -191,7 +175,7 @@ export default function SensorTestPage() {
           Kontrol Cepat Sistem Alarm & Sensor
         </h3>
         <p className="text-xs text-slate-500">
-          Gunakan tombol di bawah untuk mengaktifkan, membisukan, atau menyinkronkan kembali kondisi sensor E18-B03P1
+          Gunakan tombol di bawah untuk mengaktifkan, membisukan alarm, atau mereset pembacaan sensor ultrasonik
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
@@ -200,7 +184,7 @@ export default function SensorTestPage() {
             type="button"
             onClick={() => {
               sendSetBuzzerAlarm(true);
-              showFeedback("Alarm Bunyi DIAKTIFKAN (ON). Buzzer berbunyi jika wadah di luar jangkauan.");
+              showFeedback("Alarm Bunyi DIAKTIFKAN (ON). Buzzer berbunyi jika wadah kosong / di luar jangkauan.");
             }}
             className={`py-3 px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 cursor-pointer transition-all ${
               isAlarmOn
@@ -234,7 +218,7 @@ export default function SensorTestPage() {
             type="button"
             onClick={() => {
               sendResetSensor();
-              showFeedback("Sensor E18 & Buzzer berhasil di-reset ke kondisi baseline!");
+              showFeedback("Sensor HC-SR04 & Buzzer berhasil di-reset ke kondisi baseline!");
             }}
             className="py-3 px-4 rounded-xl font-bold text-sm bg-slate-800 hover:bg-slate-900 text-white flex items-center justify-center gap-2 cursor-pointer transition-all shadow-md shadow-slate-300"
           >
@@ -244,19 +228,19 @@ export default function SensorTestPage() {
         </div>
       </div>
 
-      {/* Pengaturan Jarak (cm) & Kalibrasi Fisik */}
+      {/* Pengaturan Jarak (cm) & Panduan Operasional */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {/* Form Ubah Jarak & Polaritas */}
+        {/* Form Ubah Jarak Dinamis */}
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-4">
           <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide">
-            Pengaturan Jarak Acuan & Sinyal
+            Pengaturan Jarak Deteksi Dinamis
           </h3>
 
           <div className="space-y-3 text-xs">
             {/* Input Slider Jarak */}
             <div>
               <div className="flex items-center justify-between font-medium text-slate-700 mb-1">
-                <label htmlFor="dist-slider">Target Jarak Deteksi Tumbler:</label>
+                <label htmlFor="dist-slider">Target Batas Jarak Deteksi Tumbler:</label>
                 <span className="font-mono font-bold text-blue-600 text-sm bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
                   {targetDistance.toFixed(1)} cm
                 </span>
@@ -273,7 +257,7 @@ export default function SensorTestPage() {
               />
               <div className="flex justify-between text-[10px] text-slate-400 font-mono mt-0.5">
                 <span>Dekat (3 cm)</span>
-                <span>Standar (8-10 cm)</span>
+                <span>Standar (10-12 cm)</span>
                 <span>Jauh (30 cm)</span>
               </div>
             </div>
@@ -284,40 +268,17 @@ export default function SensorTestPage() {
               <input
                 id="dist-number"
                 type="number"
-                step="0.1"
+                step="0.5"
                 min="3"
                 max="30"
                 value={targetDistance}
-                onChange={(e) => setTargetDistance(parseFloat(e.target.value) || 8.0)}
+                onChange={(e) => setTargetDistance(parseFloat(e.target.value) || 12.0)}
                 className="w-24 border border-slate-300 rounded-lg px-2.5 py-1.5 font-mono text-xs text-center font-bold"
               />
             </div>
 
-            {/* Pemilihan Polaritas Sinyal */}
-            <div className="pt-2 border-t border-slate-100">
-              <span className="text-slate-700 font-medium block mb-1.5">Tipe Sinyal Logika Sensor E18:</span>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setActiveHigh(true)}
-                  className={`p-2 rounded-lg border text-left cursor-pointer transition-all ${
-                    activeHigh ? "bg-blue-50 border-blue-300 text-blue-900 font-bold" : "border-slate-200 text-slate-600"
-                  }`}
-                >
-                  <div className="font-semibold text-xs">PNP (Active HIGH)</div>
-                  <div className="text-[10px] text-slate-500">Standar E18-B03P1</div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveHigh(false)}
-                  className={`p-2 rounded-lg border text-left cursor-pointer transition-all ${
-                    !activeHigh ? "bg-blue-50 border-blue-300 text-blue-900 font-bold" : "border-slate-200 text-slate-600"
-                  }`}
-                >
-                  <div className="font-semibold text-xs">NPN (Active LOW)</div>
-                  <div className="text-[10px] text-slate-500">Model Open-Collector</div>
-                </button>
-              </div>
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-600 text-[11px] leading-relaxed">
+              💡 <strong>Info Kalibrasi:</strong> Saat tumbler diletakkan pada jarak di bawah angka ini (&le; {targetDistance.toFixed(1)} cm), dispenser mengenali tumbler telah terpasang dan tombol <strong>LANJUT</strong> di layar dispenser akan diizinkan.
             </div>
 
             {/* Tombol Simpan */}
@@ -332,34 +293,34 @@ export default function SensorTestPage() {
           </div>
         </div>
 
-        {/* Panduan Kalibrasi Trimpot Baut Putar */}
+        {/* Panduan Penggunaan & Serial Commands */}
         <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 space-y-3 text-xs text-slate-700">
           <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide flex items-center gap-1.5">
             <span>⚙️</span>
-            <span>Panduan Kalibrasi Baut Trimpot E18</span>
+            <span>Cara Pakai & Perintah Serial Offline</span>
           </h3>
 
           <p className="text-slate-600 leading-relaxed">
-            Sensor E18-B03P1 memiliki <strong>baut putar (trimpot)</strong> di bagian belakang silinder. Lakukan kalibrasi fisik berikut:
+            Selain melalui web ini, Anda juga dapat mengatur jarak tumbler secara instan via <strong>Serial Monitor</strong> (Baudrate 115200):
           </p>
 
-          <ol className="list-decimal pl-4 space-y-2 text-slate-600 leading-relaxed">
-            <li>
-              <strong>Posisikan Tumbler</strong>: Letakkan tumbler atau botol Anda pada dudukan tepat berjarak <strong>{targetDistance} cm</strong> di depan lensa sensor.
-            </li>
-            <li>
-              <strong>Putar Baut Belakang</strong>:
-              Gunakan obeng minus kecil. Putar baut searah jarum jam (CW) untuk menambah jarak atau berlawanan arah (CCW) untuk memperpendek jarak.
-            </li>
-            <li>
-              <strong>Amati Lampu LED Sensor</strong>:
-              Hentikan putaran tepat saat lampu LED merah di belakang sensor menyala dan indikator web di samping berubah menjadi <span className="font-bold text-emerald-700">"Wadah Masuk Jangkauan"</span>.
-            </li>
-            <li>
-              <strong>Verifikasi Suara</strong>:
-              Saat tumbler ditaruh $\rightarrow$ buzzer seketika senyap. Saat tumbler diangkat $\rightarrow$ buzzer berbunyi alarm.
-            </li>
-          </ol>
+          <div className="bg-white p-3 rounded-xl border border-slate-200 font-mono text-[11px] space-y-1.5 text-slate-800">
+            <div><span className="text-blue-600 font-bold">DIST:10.5</span> &rarr; Ubah jarak acuan ke 10.5 cm</div>
+            <div><span className="text-blue-600 font-bold">DIST?</span> &rarr; Cek jarak live riil & status tumbler</div>
+            <div><span className="text-blue-600 font-bold">ALARM:1</span> &rarr; Aktifkan bunyi alarm wadah kosong</div>
+            <div><span className="text-blue-600 font-bold">ALARM:0</span> &rarr; Matikan bunyi alarm (senyap)</div>
+            <div><span className="text-blue-600 font-bold">BEEP</span> &rarr; Uji coba bunyi buzzer</div>
+          </div>
+
+          <div className="pt-1 text-slate-600">
+            <strong>Pin Hardware:</strong>
+            <ul className="list-disc pl-4 mt-1 space-y-0.5">
+              <li><strong>TRIG</strong> &rarr; GPIO 25 ESP32</li>
+              <li><strong>ECHO</strong> &rarr; GPIO 26 ESP32</li>
+              <li><strong>BUZZER</strong> &rarr; GPIO 27 ESP32</li>
+              <li><strong>VCC/GND</strong> &rarr; 5V (VIN) &amp; GND</li>
+            </ul>
+          </div>
         </div>
       </div>
 

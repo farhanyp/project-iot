@@ -41,11 +41,13 @@ QueueHandle_t qNetToUI = NULL;
 QueueHandle_t qUIToNet = NULL;
 TaskHandle_t netTaskHandle = NULL;
 
-// Batas Nilai Kalibrasi Touch XPT2046 (Diisi dari NVS Flash / Auto-Kalibrasi)
-uint16_t touchMinX = 260;
-uint16_t touchMaxX = 3700;
-uint16_t touchMinY = 260;
-uint16_t touchMaxY = 3700;
+// Batas Nilai Kalibrasi Touch XPT2046 (Profil Hardware Terukur Fisik):
+// Sumbu X layar (p.y): 500 (Kiri) -> 3400 (Kanan)
+// Sumbu Y layar (p.x): 3400 (Atas) -> 590 (Bawah)
+uint16_t touchMinX = 500;
+uint16_t touchMaxX = 3400;
+uint16_t touchMinY = 3400;
+uint16_t touchMaxY = 590;
 
 // Data paket default (akan otomatis diupdate saat tersinkronisasi dengan backend web)
 DispenserPackage dispenserPackages[MAX_PACKAGES] = {
@@ -82,14 +84,15 @@ int animationFrame                    = 0;
 unsigned long lastAnimationTime       = 0;
 char activeOrderId[40]                = "";
 char activeNominalStr[16]             = "";
-char activeQrPayload[256]             = "";
+char activeQrPayload[512]             = "";
 
-// Variabel Kontrol Sensor E18-B03P1 & Buzzer
+// Variabel Kontrol Sensor Ultrasonik HC-SR04 & Buzzer
 bool isTumblerPresent                 = false;
 bool isBuzzerAlarmEnabled             = true;
 bool isBuzzerSounding                 = false;
-float targetDistanceCm                = 8.0f;
-bool sensorActiveHigh                 = true; // E18-B03P1 PNP NO (HIGH saat objek terdeteksi)
+float targetDistanceCm                = 12.0f; // Jarak deteksi tumbler (misal <= 12 cm)
+float currentMeasuredDistanceCm       = 0.0f;  // Jarak live terukur oleh HC-SR04
+bool sensorActiveHigh                 = true;  // Kompatibilitas config
 
 // State Machine Buzzer Non-Blocking Bebas Konflik Antar-Core
 volatile unsigned long buzzerBeepUntil        = 0;
@@ -114,8 +117,12 @@ void handleIncomingNetworkMessages() {
     }
     else if (netMsg.type == NET_MSG_SHOW_QRIS) {
       unsigned long durSec = (netMsg.timeoutSeconds >= 60) ? netMsg.timeoutSeconds : 300;
+      if (strlen(netMsg.orderId) > 0) {
+        strncpy(activeOrderId, netMsg.orderId, sizeof(activeOrderId) - 1);
+        currentTransactionId = String(netMsg.orderId);
+      }
       // Jika saat ini sudah di layar QRIS, jangan potong countdown yang sedang berjalan!
-      if (currentScreen == SCREEN_QRIS && qrisStartTime > 0) {
+      if (currentScreen == SCREEN_QRIS && qrisStartTime > 0 && millis() >= qrisStartTime) {
         unsigned long elapsed = (millis() - qrisStartTime) / 1000;
         if (elapsed < qrisDurationSeconds) {
           durSec = qrisDurationSeconds - elapsed;
@@ -162,14 +169,14 @@ void handleIncomingNetworkMessages() {
 // ==============================================================================
 // HANDLER SENTUHAN LAYAR TOUCH SCREEN TERPADU (TFT_eSPI Zero-Lag & Filtered)
 // ==============================================================================
-void handleTouchScreen() {
+bool handleTouchScreen() {
   int touchX = 0, touchY = 0;
 
   // Baca sentuhan melalui fungsi terisolasi SPI XPT2046 dengan filter noise
   bool isTouched = getDisplayTouch(touchX, touchY);
-  if (!isTouched) return;
+  if (!isTouched) return false;
 
-  beepOnce(40); // Feedback audio sentuhan tombol
+  beepOnce(25); // Feedback audio sentuhan ringan (tactile tick)
   Serial.printf("[TOUCH] X=%d, Y=%d (Screen: %d)\n", touchX, touchY, currentScreen);
 
   // ----------------------------------------------------------------------------
@@ -185,10 +192,12 @@ void handleTouchScreen() {
       int yStart = cardY + i * (cardH + cardGap);
       int yEnd = yStart + cardH;
 
-      // Area toleransi sentuhan kartu
-      if (touchY >= (yStart - 4) && touchY <= (yEnd + 4) && touchX >= 8 && touchX <= 232) {
+      // Area toleransi sentuhan kartu luas: +-8px vertikal dan selebar layar horizontal
+      if (touchY >= (yStart - 8) && touchY <= (yEnd + 8) && touchX >= 4 && touchX <= 236) {
         Serial.printf("[TOUCH] Menu %d dipilih: %s (%d mL - Rp %ld)\n", 
                       i + 1, dispenserPackages[i].name, dispenserPackages[i].volumeMl, dispenserPackages[i].price);
+
+        beepOnce(70); // Bip konfirmasi pilihan paket
 
         // 1. FEEDBACK VISUAL INSTAN (<1ms via TFT_eSPI)
         tft.drawRoundRect(10, yStart, 220, cardH, 6, TFT_GREEN);
@@ -221,7 +230,7 @@ void handleTouchScreen() {
 
         // Kunci sentuhan 3 detik penuh agar jari pembeli tidak memicu tombol batal
         qrisIgnoreTouchUntil = millis() + 3000;
-        return;
+        return true;
       }
     }
   }
@@ -230,12 +239,12 @@ void handleTouchScreen() {
   // KASUS 2: Di Layar QRIS (Tombol Batalkan Pesanan - Anti False Trigger & Hold Debounce)
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_QRIS) {
-    if (millis() < qrisIgnoreTouchUntil) return;
+    if (millis() < qrisIgnoreTouchUntil) return false;
 
     static unsigned long cancelPressStart = 0;
 
-    // Batasi koordinat sentuh tombol secara ketat (X: 20-220, Y: 288-318)
-    if (touchX >= 20 && touchX <= 220 && touchY >= 288 && touchY <= 318) {
+    // Batasi koordinat sentuh tombol dengan toleransi empuk (X: 10-230, Y: 275-320)
+    if (touchX >= 10 && touchX <= 230 && touchY >= 275 && touchY <= 320) {
       if (cancelPressStart == 0) {
         cancelPressStart = millis();
         // Beri feedback visual tombol ditekan
@@ -244,29 +253,31 @@ void handleTouchScreen() {
         tft.setTextSize(1);
         tft.setCursor(65, 300);
         tft.print("[ MEMBATALKAN... ]");
-        return;
+        return false;
       }
 
-      // Wajib ditahan minimal 300ms untuk memastikan ini sentuhan sengaja (bukan noise / sentuhan sesaat)
-      if (millis() - cancelPressStart >= 300) {
+      // Ditahan minimal 200ms untuk memastikan sentuhan disengaja
+      if (millis() - cancelPressStart >= 200) {
         Serial.println("[TOUCH] Customer mengonfirmasi pembatalan pesanan QRIS.");
         cancelPressStart = 0;
+        beepOnce(80);
         
         // Kirim pesan pembatalan ke Core 0
         UIToNetMessage uiMsg;
         memset(&uiMsg, 0, sizeof(uiMsg));
         uiMsg.type = UI_MSG_ORDER_CANCEL;
+        strncpy(uiMsg.orderId, activeOrderId, sizeof(uiMsg.orderId) - 1);
         if (qUIToNet != NULL) {
           xQueueSend(qUIToNet, &uiMsg, 0);
         }
         
         showStandbyScreen();
-        return;
+        return true;
       }
     } else {
       if (cancelPressStart != 0) {
         cancelPressStart = 0;
-        // Kembalikan tampilan tombol normal jika jari terlepas sebelum 300ms
+        // Kembalikan tampilan tombol normal jika jari terlepas sebelum 200ms
         tft.fillRoundRect(8, 292, 224, 24, 4, 0x3000);
         tft.drawRoundRect(8, 292, 224, 24, 4, TFT_RED);
         tft.setTextColor(TFT_WHITE, 0x3000);
@@ -281,7 +292,8 @@ void handleTouchScreen() {
   // KASUS 3: Di Layar Letakkan Tumbler (Tombol LANJUT / NEXT)
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_PLACE_TUMBLER) {
-    if (touchY >= 165 && touchY <= 240 && touchX >= 10 && touchX <= 230) {
+    // Area sentuh tombol NEXT luas (Y: 155-250, X: 4-236)
+    if (touchY >= 155 && touchY <= 250 && touchX >= 4 && touchX <= 236) {
       // Proteksi Keamanan: Cegah air tumpah jika tumbler belum diletakkan di bawah corong
       if (!isTumblerPresent) {
         Serial.println("[SAFETY] Tombol NEXT ditekan tapi tumbler belum terdeteksi di sensor!");
@@ -301,10 +313,11 @@ void handleTouchScreen() {
         tft.setTextSize(1);
         tft.setCursor(25, 210);
         tft.print("Sentuh di sini untuk isi air");
-        return;
+        return false;
       }
 
       Serial.println("[TOUCH] Tombol NEXT ditekan! Wadah sudah terdeteksi di sensor.");
+      beepOnce(80);
 
       // Feedback visual seketika
       tft.fillRoundRect(10, 174, 220, 54, 8, TFT_GREEN);
@@ -321,7 +334,7 @@ void handleTouchScreen() {
       // Nyalakan Pompa & Pindah ke Animasi Dispensing
       startPump();
       showDispensingScreen(targetMilliLitres);
-      return;
+      return true;
     }
   }
 
@@ -329,8 +342,10 @@ void handleTouchScreen() {
   // KASUS 4: Di Layar Pengisian Air (Tombol STOP Darurat)
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_DISPENSING) {
-    if (touchY >= 190 && touchY <= 240 && touchX >= 10 && touchX <= 230) {
+    // Area sentuh STOP darurat luas (Y: 180-255, X: 4-236)
+    if (touchY >= 180 && touchY <= 255 && touchX >= 4 && touchX <= 236) {
       Serial.println("[TOUCH] STOP DARURAT DITEKAN!");
+      beepOnce(120);
       isDispensing = false;
       stopPump();
       showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Tombol Stop Darurat Ditekan");
@@ -346,9 +361,11 @@ void handleTouchScreen() {
       if (qUIToNet != NULL) {
         xQueueSend(qUIToNet, &uiMsg, 0);
       }
-      return;
+      return true;
     }
   }
+
+  return false;
 }
 
 // ==============================================================================
@@ -381,8 +398,9 @@ void setup() {
   // Inisialisasi WiFiManager Captive Portal (Sinkron saat boot)
   setupWiFiManager();
 
-  // Konfigurasi Klien MQTT Broker
+  // Konfigurasi Klien MQTT Broker (Buffer 1024 bytes untuk payload QRIS EMVCo)
   mqttClient.setServer(mqtt_broker, MQTT_PORT);
+  mqttClient.setBufferSize(1024);
   mqttClient.setCallback(mqttCallback);
 
   // Buat FreeRTOS Dedicated Task untuk Network & MQTT pada Core 0 (PRO_CPU)
@@ -401,24 +419,121 @@ void setup() {
 }
 
 // ==============================================================================
+// HANDLER PERINTAH SERIAL MONITOR (KONTROL CEPAT & KALIBRASI JARAK DINAMIS)
+// ==============================================================================
+void handleSerialCommands() {
+  if (!Serial.available()) return;
+
+  String cmd = Serial.readStringUntil('\n');
+  cmd.trim();
+  if (cmd.length() == 0) return;
+
+  // 1. Perintah DIST:<angka> (Contoh: DIST:10 atau DIST:12.5)
+  if (cmd.startsWith("DIST:") || cmd.startsWith("dist:")) {
+    String valStr = cmd.substring(5);
+    valStr.trim();
+    float newDist = valStr.toFloat();
+    if (newDist >= 2.0f && newDist <= 50.0f) {
+      saveUltrasonicTargetDistance(newDist);
+      Serial.printf(">> [OK] Target jarak deteksi diperbarui: <= %.1f cm (Tersimpan ke NVS Flash)\n", targetDistanceCm);
+      beepOnce(80);
+    } else {
+      Serial.println(">> [ERROR] Nilai jarak tidak valid! Masukkan antara 2.0 s/d 50.0 cm (Contoh: DIST:12.0)");
+    }
+  }
+  // 2. Perintah DIST? (Cek Jarak Live)
+  else if (cmd.equalsIgnoreCase("DIST?") || cmd.equalsIgnoreCase("STATUS?")) {
+    float liveDist = readUltrasonicDistanceCm();
+    Serial.println("==================================================");
+    Serial.printf(">> STATUS SENSOR ULTRASONIK HC-SR04:\n");
+    Serial.printf("   - Jarak Terukur Live  : %.1f cm\n", liveDist);
+    Serial.printf("   - Target Jarak Acuan  : <= %.1f cm\n", targetDistanceCm);
+    Serial.printf("   - Status Tumbler      : %s\n", (liveDist >= 1.5f && liveDist <= targetDistanceCm) ? "TERPASANG (OK)" : "TIDAK ADA / KOSONG");
+    Serial.printf("   - Alarm Buzzer        : %s\n", isBuzzerAlarmEnabled ? "AKTIF (ON)" : "MATI (OFF)");
+    Serial.println("==================================================");
+  }
+  // 3. Perintah ALARM:1 / ALARM:0
+  else if (cmd.equalsIgnoreCase("ALARM:1") || cmd.equalsIgnoreCase("ALARM:ON")) {
+    setBuzzerAlarmEnabled(true);
+    Serial.println(">> [OK] Alarm Bunyi Wadah Kosong DIAKTIFKAN (ON)");
+    beepOnce(100);
+  }
+  else if (cmd.equalsIgnoreCase("ALARM:0") || cmd.equalsIgnoreCase("ALARM:OFF")) {
+    setBuzzerAlarmEnabled(false);
+    Serial.println(">> [OK] Alarm Bunyi Wadah Kosong DIMATIKAN (OFF)");
+  }
+  // 4. Perintah BEEP
+  else if (cmd.startsWith("BEEP") || cmd.startsWith("beep")) {
+    beepPattern(2);
+    Serial.println(">> [OK] Uji coba buzzer dipicu (2 bip)");
+  }
+  // 5. Perintah TOUCH:RESET (Hapus Kalibrasi Korup di NVS)
+  else if (cmd.equalsIgnoreCase("TOUCH:RESET") || cmd.equalsIgnoreCase("CAL:RESET")) {
+    resetTouchCalibrationToDefault();
+    beepOnce(100);
+  }
+  // 6. Perintah TOUCH? (Cek Parameter Kalibrasi Touch)
+  else if (cmd.equalsIgnoreCase("TOUCH?") || cmd.equalsIgnoreCase("CAL?")) {
+    Serial.println("==================================================");
+    Serial.println(">> STATUS KALIBRASI SENTUH XPT2046:");
+    Serial.printf("   - Sumbu X Layar (p.y) : %d -> %d (Min -> Max)\n", touchMinX, touchMaxX);
+    Serial.printf("   - Sumbu Y Layar (p.x) : %d -> %d (Min -> Max)\n", touchMinY, touchMaxY);
+    Serial.printf("   - Swap XY             : %s\n", TS_SWAP_XY ? "TRUE" : "FALSE");
+    Serial.println("==================================================");
+  }
+  // 7. Perintah TOUCH:CAL (Mulai Kalibrasi Interaktif Crosshair di Layar)
+  else if (cmd.equalsIgnoreCase("TOUCH:CAL") || cmd.equalsIgnoreCase("CAL:START")) {
+    Serial.println(">> [OK] Memulai kalibrasi interaktif layar...");
+    initTouchCalibration(true);
+    showStandbyScreen();
+  }
+  // 8. Perintah WIFI:RESET (Hapus Kredensial Wi-Fi & Buka Hotspot Setup)
+  else if (cmd.equalsIgnoreCase("WIFI:RESET") || cmd.equalsIgnoreCase("RESET:WIFI")) {
+    Serial.println(">> [OK] Perintah reset Wi-Fi diterima. Menghapus Wi-Fi dan restart...");
+    beepPattern(3);
+    resetWiFiSettings();
+  }
+  // 9. Bantuan Command
+  else if (cmd.equalsIgnoreCase("HELP") || cmd.equalsIgnoreCase("?")) {
+    Serial.println(">> PERINTAH SERIAL TERSEDIA:");
+    Serial.println("   - WIFI:RESET  : Hapus Wi-Fi tersimpan & buka hotspot WaterVend-Setup");
+    Serial.println("   - DIST:<cm>   : Atur target jarak dinamis (Contoh: DIST:12.0)");
+    Serial.println("   - DIST?       : Cek jarak live saat ini & status tumbler");
+    Serial.println("   - ALARM:1 / 0 : Aktifkan (1) atau Matikan (0) bunyi alarm buzzer");
+    Serial.println("   - BEEP        : Uji coba bunyi buzzer");
+    Serial.println("   - TOUCH:RESET : Hapus kalibrasi NVS dan kembalikan ke profil hardware");
+    Serial.println("   - TOUCH:CAL   : Mulai kalibrasi sentuh interaktif (tanda silang di layar)");
+    Serial.println("   - TOUCH?      : Cek nilai kalibrasi XPT2046 saat ini");
+  }
+}
+
+// ==============================================================================
 // LOOP UTAMA: DEDICATED UI & CONTROL TASK (BERJALAN DI CORE 1 APP_CPU)
 // ==============================================================================
 void loop() {
-  // 1. Baca Sensor Proximity E18-B03P1 & Evaluasi Alarm Buzzer
+  // 1. Baca Perintah Serial Monitor (Offline Dynamic Distance Config)
+  handleSerialCommands();
+
+  // 2. Baca Sensor Ultrasonik HC-SR04 & Evaluasi Alarm Buzzer
   isTumblerPresent = checkTumblerPresent();
   updateSensorBuzzerAlarm(isTumblerPresent);
 
-  // 2. Proses Pesan Masuk dari Core 0 (Event Jaringan & MQTT)
+  // 3. Proses Pesan Masuk dari Core 0 (Event Jaringan & MQTT)
   handleIncomingNetworkMessages();
 
-  unsigned long currentMillis = millis();
-
   // 3. Baca Input Sentuhan Layar Touch Screen (High Priority, Zero-Lag)
-  handleTouchScreen();
+  if (handleTouchScreen()) {
+    // Layar baru saja berpindah melalui interaksi sentuhan.
+    // Segera akhiri iterasi loop ini agar layar baru dievaluasi dengan timer segar di iterasi berikutnya!
+    return;
+  }
+
+  // Refresh waktu saat ini setelah interaksi sentuhan
+  unsigned long currentMillis = millis();
 
   // 3. Status 1: Proses Pengisian Air Sedang Berlangsung (Dispensing)
   if (isDispensing) {
-    unsigned long elapsedTimeMs = currentMillis - dispenseStartTime;
+    unsigned long elapsedTimeMs = (currentMillis >= dispenseStartTime) ? (currentMillis - dispenseStartTime) : 0;
     dispensedMilliLitres = calculateLiveDispensedMl(elapsedTimeMs, targetMilliLitres);
 
     // Perbarui Animasi Aliran Air & Angka Live di Layar LCD
@@ -478,16 +593,19 @@ void loop() {
 
   // 4. Status 2: Sedang Menampilkan QRIS (Evaluasi Countdown 5 Menit = 300 Detik Penuh)
   else if (currentScreen == SCREEN_QRIS) {
-    if (qrisStartTime == 0) qrisStartTime = currentMillis;
+    if (qrisStartTime == 0 || currentMillis < qrisStartTime) {
+      qrisStartTime = currentMillis;
+    }
     if (qrisDurationSeconds < 60) qrisDurationSeconds = 300;
 
-    unsigned long elapsedSec = (currentMillis - qrisStartTime) / 1000;
+    unsigned long elapsedSec = (currentMillis >= qrisStartTime) ? ((currentMillis - qrisStartTime) / 1000) : 0;
     if (elapsedSec >= qrisDurationSeconds) {
       Serial.printf("[QRIS] Batas waktu %lu detik tercapai! Membatalkan otomatis...\n", qrisDurationSeconds);
       
       UIToNetMessage uiMsg;
       memset(&uiMsg, 0, sizeof(uiMsg));
       uiMsg.type = UI_MSG_ORDER_CANCEL;
+      strncpy(uiMsg.orderId, activeOrderId, sizeof(uiMsg.orderId) - 1);
       if (qUIToNet != NULL) {
         xQueueSend(qUIToNet, &uiMsg, 0);
       }

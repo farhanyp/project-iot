@@ -26,6 +26,7 @@ export interface TelemetryData {
   buzzerAlarmEnabled?: boolean;
   isBuzzerSounding?: boolean;
   targetDistanceCm?: number;
+  currentDistanceCm?: number;
   rawSensorSignal?: number;
 }
 

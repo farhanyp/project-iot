@@ -33,8 +33,9 @@
 const int PIN_RELAY_PUMP_CH1     = 5;  // GPIO 5 (Pompa Air, Active LOW)
 const int PIN_TRIGGER_RESET_WIFI = 0;  // GPIO 0 (Tombol BOOT ESP32)
 
-// Pin Sensor Infrared Photoelectric E18-B03P1 & Buzzer
-const int PIN_PROXIMITY_SENSOR   = 26; // GPIO 26 (Kabel Hitam E18 via divider 1k/2k)
+// Pin Sensor Ultrasonik HC-SR04 & Buzzer
+const int PIN_ULTRASONIC_TRIG    = 25; // GPIO 25 (Output Trigger Pulsa HC-SR04)
+const int PIN_ULTRASONIC_ECHO    = 26; // GPIO 26 (Input Echo Pantulan HC-SR04)
 const int PIN_BUZZER             = 27; // GPIO 27 (Kaki Positif Buzzer)
 
 #define RELAY_ACTIVE_STATE LOW
@@ -53,9 +54,12 @@ const int PIN_BUZZER             = 27; // GPIO 27 (Kaki Positif Buzzer)
 // Tambahkan 0x08 jika warna Merah dan Biru tertukar (BGR) -> contoh: 0x48 atau 0x88
 #define TFT_MADCTL_VAL        0x40
 
-// Pembalik sumbu sentuh (Ubah ke true jika titik sentuh berlawanan dengan posisi tombol)
-#define TS_FLIP_X             false
-#define TS_FLIP_Y             false
+// Konfigurasi Sumbu Sentuh XPT2046:
+// Data fisik ADC: p.y mengontrol sumbu X layar (500=Kiri, 3400=Kanan),
+// sedangkan p.x mengontrol sumbu Y layar (3400=Atas, 590=Bawah).
+#define TS_SWAP_XY            true   // Tukar sumbu (p.y -> X layar, p.x -> Y layar)
+#define TS_FLIP_X             false  // Tidak perlu flip X karena p.y sudah meningkat dari kiri ke kanan
+#define TS_FLIP_Y             false  // Pemetaan sumbu Y diatur langsung dari 3400 ke 590
 
 // Alias Warna Kompatibilitas (TFT_eSPI 16-bit 565 Color)
 #define ST77XX_BLACK   TFT_BLACK
@@ -86,7 +90,7 @@ struct NetToUIMessage {
   unsigned long volumeMl;
   char orderId[40];
   char nominal[16];
-  char qrPayload[256];
+  char qrPayload[512];
   unsigned long timeoutSeconds;
 };
 
@@ -191,13 +195,14 @@ extern int animationFrame;
 extern unsigned long lastAnimationTime;
 extern char activeOrderId[40];
 extern char activeNominalStr[16];
-extern char activeQrPayload[256];
+extern char activeQrPayload[512];
 
-// Variabel Kontrol Sensor E18-B03P1 & Buzzer
+// Variabel Kontrol Sensor Ultrasonik HC-SR04 & Buzzer
 extern bool isTumblerPresent;
 extern bool isBuzzerAlarmEnabled;
 extern bool isBuzzerSounding;
 extern float targetDistanceCm;
+extern float currentMeasuredDistanceCm;
 extern bool sensorActiveHigh;
 
 // State Machine Buzzer Non-Blocking Bebas Konflik Antar-Core
