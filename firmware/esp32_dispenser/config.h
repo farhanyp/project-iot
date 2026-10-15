@@ -175,9 +175,12 @@ extern unsigned long lastTelemetryPublishTime;
 extern unsigned long lastMqttRetryTime;
 
 extern bool isDispensing;
+extern bool isDispensePaused;
 extern unsigned long targetMilliLitres;
 extern unsigned long dispensedMilliLitres;
 extern unsigned long dispenseStartTime;
+extern unsigned long activePumpDurationMs;
+extern unsigned long lastPumpIterationMillis;
 extern String currentTransactionId;
 
 extern ScreenState currentScreen;

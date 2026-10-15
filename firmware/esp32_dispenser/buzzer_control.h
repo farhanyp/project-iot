@@ -86,23 +86,7 @@ inline void updateSensorBuzzerAlarm(bool tumblerDetected) {
     }
   }
 
-  // 2. Mode Alarm Jangkauan: Berbunyi saat wadah TIDAK ADA (Di luar jangkauan)
-  if (isBuzzerAlarmEnabled) {
-    if (!tumblerDetected) {
-      // Wadah di luar jangkauan: alarm bip berdenyut 150ms ON / 150ms OFF
-      unsigned long phase = now % 300;
-      if (phase < 150) {
-        digitalWrite(PIN_BUZZER, HIGH);
-        isBuzzerSounding = true;
-      } else {
-        digitalWrite(PIN_BUZZER, LOW);
-        isBuzzerSounding = false;
-      }
-      return;
-    }
-  }
-
-  // 3. Jika tumbler terdeteksi atau alarm nonaktif: Pastikan buzzer MATI
+  // 2. Jika tidak ada antrean bip: Pastikan buzzer MATI (Senyap, tidak ada alarm terus-menerus)
   if (isBuzzerSounding) {
     digitalWrite(PIN_BUZZER, LOW);
     isBuzzerSounding = false;

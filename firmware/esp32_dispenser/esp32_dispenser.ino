@@ -64,9 +64,12 @@ unsigned long lastTelemetryPublishTime = 0;
 unsigned long lastMqttRetryTime       = 0;
 
 bool isDispensing                     = false;
+bool isDispensePaused                 = false;
 unsigned long targetMilliLitres       = 0;
 unsigned long dispensedMilliLitres    = 0;
 unsigned long dispenseStartTime       = 0;
+unsigned long activePumpDurationMs    = 0;
+unsigned long lastPumpIterationMillis = 0;
 String currentTransactionId           = "";
 
 ScreenState currentScreen             = SCREEN_BOOT_WIFI;
@@ -141,14 +144,18 @@ void handleIncomingNetworkMessages() {
       currentTransactionId = String(netMsg.orderId);
       requiredDispenseDurationMs = calculateDispenseDurationMs(targetMilliLitres);
       dispensedMilliLitres = 0;
+      activePumpDurationMs = 0;
+      lastPumpIterationMillis = millis();
       dispenseStartTime = millis();
       isDispensing = true;
+      isDispensePaused = false;
 
       startPump();
       showDispensingScreen(targetMilliLitres);
     }
     else if (netMsg.type == NET_MSG_CMD_STOP) {
       isDispensing = false;
+      isDispensePaused = false;
       stopPump();
       showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Tombol Stop Darurat Ditekan");
     }
@@ -292,26 +299,26 @@ bool handleTouchScreen() {
   // KASUS 3: Di Layar Letakkan Tumbler (Tombol LANJUT / NEXT)
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_PLACE_TUMBLER) {
-    // Area sentuh tombol NEXT luas (Y: 155-250, X: 4-236)
-    if (touchY >= 155 && touchY <= 250 && touchX >= 4 && touchX <= 236) {
+    // Area sentuh tombol NEXT luas (Y: 150-224, X: 4-236)
+    if (touchY >= 150 && touchY <= 224 && touchX >= 4 && touchX <= 236) {
       // Proteksi Keamanan: Cegah air tumpah jika tumbler belum diletakkan di bawah corong
       if (!isTumblerPresent) {
         Serial.println("[SAFETY] Tombol NEXT ditekan tapi tumbler belum terdeteksi di sensor!");
-        tft.fillRoundRect(10, 174, 220, 54, 8, TFT_RED);
+        tft.fillRoundRect(10, 160, 220, 54, 8, TFT_RED);
         tft.setTextColor(TFT_WHITE, TFT_RED);
         tft.setTextSize(2);
-        tft.setCursor(20, 190);
+        tft.setCursor(20, 176);
         tft.print("PASANG TUMBLER!");
         beepPattern(2);
         delay(600);
-        tft.fillRoundRect(10, 174, 220, 54, 8, TFT_GREEN);
-        tft.drawRoundRect(10, 174, 220, 54, 8, TFT_WHITE);
+        tft.fillRoundRect(10, 160, 220, 54, 8, TFT_GREEN);
+        tft.drawRoundRect(10, 160, 220, 54, 8, TFT_WHITE);
         tft.setTextColor(TFT_BLACK, TFT_GREEN);
         tft.setTextSize(2);
-        tft.setCursor(32, 186);
+        tft.setCursor(32, 172);
         tft.print("LANJUT (NEXT) >");
         tft.setTextSize(1);
-        tft.setCursor(25, 210);
+        tft.setCursor(25, 196);
         tft.print("Sentuh di sini untuk isi air");
         return false;
       }
@@ -320,16 +327,19 @@ bool handleTouchScreen() {
       beepOnce(80);
 
       // Feedback visual seketika
-      tft.fillRoundRect(10, 174, 220, 54, 8, TFT_GREEN);
+      tft.fillRoundRect(10, 160, 220, 54, 8, TFT_GREEN);
       tft.setTextColor(TFT_BLACK, TFT_GREEN);
       tft.setTextSize(2);
-      tft.setCursor(35, 190);
+      tft.setCursor(35, 176);
       tft.print("MEMULAI...");
 
       requiredDispenseDurationMs = calculateDispenseDurationMs(targetMilliLitres);
       dispensedMilliLitres = 0;
+      activePumpDurationMs = 0;
+      lastPumpIterationMillis = millis();
       dispenseStartTime = millis();
       isDispensing = true;
+      isDispensePaused = false;
 
       // Nyalakan Pompa & Pindah ke Animasi Dispensing
       startPump();
@@ -347,6 +357,7 @@ bool handleTouchScreen() {
       Serial.println("[TOUCH] STOP DARURAT DITEKAN!");
       beepOnce(120);
       isDispensing = false;
+      isDispensePaused = false;
       stopPump();
       showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Tombol Stop Darurat Ditekan");
 
@@ -514,14 +525,23 @@ void loop() {
   // 1. Baca Perintah Serial Monitor (Offline Dynamic Distance Config)
   handleSerialCommands();
 
-  // 2. Baca Sensor Ultrasonik HC-SR04 & Evaluasi Alarm Buzzer
-  isTumblerPresent = checkTumblerPresent();
+  // 2. Baca Sensor Ultrasonik HC-SR04 HANYA pada 2 kondisi: SCREEN_PLACE_TUMBLER atau SCREEN_DISPENSING
+  if (currentScreen == SCREEN_PLACE_TUMBLER || currentScreen == SCREEN_DISPENSING) {
+    isTumblerPresent = checkTumblerPresent();
+  } else {
+    isTumblerPresent = false; // Sensor hibernasi pada Standby, QRIS, Complete, Boot
+  }
   updateSensorBuzzerAlarm(isTumblerPresent);
+
+  // Perbarui indikator wadah jika sedang di layar letakkan tumbler
+  if (currentScreen == SCREEN_PLACE_TUMBLER) {
+    updatePlaceTumblerUI(isTumblerPresent, currentMeasuredDistanceCm);
+  }
 
   // 3. Proses Pesan Masuk dari Core 0 (Event Jaringan & MQTT)
   handleIncomingNetworkMessages();
 
-  // 3. Baca Input Sentuhan Layar Touch Screen (High Priority, Zero-Lag)
+  // 4. Baca Input Sentuhan Layar Touch Screen (High Priority, Zero-Lag)
   if (handleTouchScreen()) {
     // Layar baru saja berpindah melalui interaksi sentuhan.
     // Segera akhiri iterasi loop ini agar layar baru dievaluasi dengan timer segar di iterasi berikutnya!
@@ -531,10 +551,39 @@ void loop() {
   // Refresh waktu saat ini setelah interaksi sentuhan
   unsigned long currentMillis = millis();
 
-  // 3. Status 1: Proses Pengisian Air Sedang Berlangsung (Dispensing)
+  // 5. Status 1: Proses Pengisian Air Sedang Berlangsung (Dispensing)
   if (isDispensing) {
-    unsigned long elapsedTimeMs = (currentMillis >= dispenseStartTime) ? (currentMillis - dispenseStartTime) : 0;
-    dispensedMilliLitres = calculateLiveDispensedMl(elapsedTimeMs, targetMilliLitres);
+    // PROTEKSI SENSOR WADAH: SMART PAUSE & RESUME
+    if (!isTumblerPresent) {
+      // WADAH TERLEPAS / DITARIK!
+      if (!isDispensePaused) {
+        isDispensePaused = true;
+        stopPump();
+        beepPattern(2); // Peringatan 2 bip wadah terlepas
+        Serial.printf("[SAFETY PAUSE] Wadah terlepas saat dispensing! Pompa DIMATIKAN sementara. Terisi: %lu/%lu mL\n",
+                      dispensedMilliLitres, targetMilliLitres);
+      }
+      // Waktu selama wadah terlepas tidak diakumulasikan ke durasi aktif pompa
+      lastPumpIterationMillis = currentMillis;
+    } else {
+      // WADAH TERPASANG KEMBALI!
+      if (isDispensePaused) {
+        isDispensePaused = false;
+        lastPumpIterationMillis = currentMillis; // Reset timestamp agar jeda tidak dihitung
+        startPump();
+        beepOnce(80); // Bip konfirmasi resume
+        Serial.printf("[SAFETY RESUME] Wadah terpasang kembali! Pompa DINYALAKAN kembali. Melanjutkan dari %lu mL...\n",
+                      dispensedMilliLitres);
+      }
+
+      // Akumulasikan waktu aktif pompa berputar
+      unsigned long deltaMs = (currentMillis >= lastPumpIterationMillis) ? (currentMillis - lastPumpIterationMillis) : 0;
+      activePumpDurationMs += deltaMs;
+      lastPumpIterationMillis = currentMillis;
+
+      // Hitung volume air keluar secara real-time berdasarkan total durasi pompa aktif
+      dispensedMilliLitres = calculateLiveDispensedMl(activePumpDurationMs, targetMilliLitres);
+    }
 
     // Perbarui Animasi Aliran Air & Angka Live di Layar LCD
     updateDispensingAnimation(dispensedMilliLitres, targetMilliLitres);
@@ -543,14 +592,14 @@ void loop() {
     if (currentMillis - lastTelemetryPublishTime >= 300) {
       lastTelemetryPublishTime = currentMillis;
 
-      float flowRateLpm = (pumpFlowRateMlPerSec * 60.0f) / 1000.0f;
+      float flowRateLpm = isDispensePaused ? 0.0f : ((pumpFlowRateMlPerSec * 60.0f) / 1000.0f);
       UIToNetMessage uiMsg;
       memset(&uiMsg, 0, sizeof(uiMsg));
       uiMsg.type = UI_MSG_TELEMETRY;
       uiMsg.dispensedMl = dispensedMilliLitres;
       uiMsg.targetMl = targetMilliLitres;
       uiMsg.flowRateLpm = flowRateLpm;
-      uiMsg.flowRateMlPerSec = pumpFlowRateMlPerSec;
+      uiMsg.flowRateMlPerSec = isDispensePaused ? 0.0f : pumpFlowRateMlPerSec;
       strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
 
       if (qUIToNet != NULL) {
@@ -559,12 +608,13 @@ void loop() {
     }
 
     // Evaluasi Syarat Otomatis Cut-Off Pompa
-    bool targetReached = (elapsedTimeMs >= requiredDispenseDurationMs) || (dispensedMilliLitres >= targetMilliLitres);
-    unsigned long maxSafetyDuration = requiredDispenseDurationMs + 5000;
-    bool timeoutSafety = (elapsedTimeMs > maxSafetyDuration);
+    bool targetReached = (activePumpDurationMs >= requiredDispenseDurationMs) || (dispensedMilliLitres >= targetMilliLitres);
+    unsigned long maxSafetyDuration = requiredDispenseDurationMs + 8000;
+    bool timeoutSafety = (activePumpDurationMs > maxSafetyDuration);
 
     if (targetReached || timeoutSafety) {
       isDispensing = false;
+      isDispensePaused = false;
       stopPump();
       dispensedMilliLitres = targetMilliLitres; // Tepat sasaran saat cut-off
 

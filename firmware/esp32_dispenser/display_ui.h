@@ -599,8 +599,13 @@ inline void updateQRISCountdown(unsigned long remainingSeconds) {
 // ==============================================================================
 // 4. TAMPILAN INSTRUKSI LETAKKAN TUMBLER & TOMBOL NEXT
 // ==============================================================================
+static bool s_placeTumblerFirstDraw = true;
+static int  s_lastTumblerStateShown = -1;
+
 inline void showPlaceTumblerScreen(unsigned long targetMl, const char* orderId = "") {
   currentScreen = SCREEN_PLACE_TUMBLER;
+  s_placeTumblerFirstDraw = true;
+  s_lastTumblerStateShown = -1;
   tft.fillScreen(TFT_BLACK);
 
   // Header Hijau Sukses
@@ -611,30 +616,30 @@ inline void showPlaceTumblerScreen(unsigned long targetMl, const char* orderId =
   tft.print("PEMBAYARAN LUNAS!");
 
   // Box Panduan Customer
-  tft.drawRoundRect(10, 40, 220, 124, 6, TFT_WHITE);
+  tft.drawRoundRect(10, 40, 220, 110, 6, TFT_WHITE);
 
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.setTextSize(2);
-  tft.setCursor(20, 50);
+  tft.setCursor(20, 48);
   tft.printf("Target: %lu mL", targetMl);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(1);
-  tft.setCursor(20, 78);
+  tft.setCursor(20, 72);
   tft.print("INSTRUKSI PENGISIAN:");
 
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.setCursor(20, 96);
+  tft.setCursor(20, 88);
   tft.print("1. Letakkan Tumbler / Botol Anda");
-  tft.setCursor(20, 110);
+  tft.setCursor(20, 100);
   tft.print("   tepat di bawah corong air.");
 
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.setCursor(20, 132);
+  tft.setCursor(20, 118);
   tft.print("2. Tekan tombol [NEXT] di bawah:");
 
   // Tombol Sentuh Besar [NEXT / LANJUT]
-  int btnY = 174;
+  int btnY = 160;
   int btnH = 54;
   tft.fillRoundRect(10, btnY, 220, btnH, 8, TFT_GREEN);
   tft.drawRoundRect(10, btnY, 220, btnH, 8, TFT_WHITE);
@@ -649,15 +654,57 @@ inline void showPlaceTumblerScreen(unsigned long targetMl, const char* orderId =
   tft.print("Sentuh di sini untuk isi air");
 }
 
+inline void updatePlaceTumblerUI(bool isPresent, float distCm) {
+  if (currentScreen != SCREEN_PLACE_TUMBLER) return;
+
+  int currentState = isPresent ? 1 : 0;
+  if (s_placeTumblerFirstDraw || currentState != s_lastTumblerStateShown) {
+    s_placeTumblerFirstDraw = false;
+    s_lastTumblerStateShown = currentState;
+
+    int badgeY = 226;
+    int badgeH = 50;
+
+    if (isPresent) {
+      // Wadah Terdeteksi -> Badge Hijau Terang
+      tft.fillRoundRect(10, badgeY, 220, badgeH, 6, 0x0320); // Dark Green
+      tft.drawRoundRect(10, badgeY, 220, badgeH, 6, TFT_GREEN);
+      tft.setTextColor(TFT_GREEN, 0x0320);
+      tft.setTextSize(1);
+      tft.setCursor(20, badgeY + 8);
+      tft.print("[ STATUS SENSOR WADAH ]");
+      tft.setTextColor(TFT_WHITE, 0x0320);
+      tft.setTextSize(2);
+      tft.setCursor(20, badgeY + 24);
+      tft.printf("WADAH OK (%.1fcm)", distCm);
+    } else {
+      // Wadah Belum Terdeteksi -> Badge Abu/Kuning Siaga
+      tft.fillRoundRect(10, badgeY, 220, badgeH, 6, 0x18C3); // Dark Gray
+      tft.drawRoundRect(10, badgeY, 220, badgeH, 6, TFT_YELLOW);
+      tft.setTextColor(TFT_YELLOW, 0x18C3);
+      tft.setTextSize(1);
+      tft.setCursor(20, badgeY + 8);
+      tft.print("[ STATUS SENSOR WADAH ]");
+      tft.setTextColor(TFT_ORANGE, 0x18C3);
+      tft.setTextSize(2);
+      tft.setCursor(20, badgeY + 24);
+      tft.print("MENUNGGU WADAH...");
+    }
+  }
+}
+
 // ==============================================================================
-// 5. TAMPILAN ANIMASI AIR MENGALIR & POMPA AKTIF
+// 5. TAMPILAN ANIMASI AIR MENGALIR & POMPA AKTIF (DENGAN SMART PAUSE/RESUME)
 // ==============================================================================
+static bool s_lastDispensePauseState = false;
+
 inline void showDispensingScreen(unsigned long targetMl) {
   currentScreen = SCREEN_DISPENSING;
   lastMlShown = 999999;
   lastBarWidth = -1;
   animationFrame = 0;
   lastAnimationTime = millis();
+  s_lastDispensePauseState = false;
   tft.fillScreen(TFT_BLACK);
 
   // Header Banner
@@ -708,7 +755,56 @@ inline void updateDispensingAnimation(unsigned long dispensedMl, unsigned long t
   float pct = (targetMl > 0) ? ((float)dispensedMl / (float)targetMl) : 0.0f;
   if (pct > 1.0f) pct = 1.0f;
 
-  // 1. Update Angka Volume jika bertambah
+  // 1. Evaluasi Perubahan State PAUSE vs RESUME
+  if (isDispensePaused != s_lastDispensePauseState) {
+    s_lastDispensePauseState = isDispensePaused;
+
+    if (isDispensePaused) {
+      // TAMPILAN SAAT WADAH TERLEPAS (PAUSE)
+      tft.fillRect(10, 34, 220, 16, TFT_BLACK);
+      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.setTextSize(1);
+      tft.setCursor(15, 36);
+      tft.print("!! WADAH TERLEPAS: POMPA DIJEDA !!");
+
+      // Hapus tetesan air yang sedang jatuh
+      tft.fillRect(193, 76, 4, 76, TFT_BLACK);
+
+      // Ubah tombol bawah menjadi banner peringatan jeda
+      tft.fillRoundRect(15, 196, 210, 34, 6, TFT_ORANGE);
+      tft.drawRoundRect(15, 196, 210, 34, 6, TFT_RED);
+      tft.setTextColor(TFT_BLACK, TFT_ORANGE);
+      tft.setTextSize(1);
+      tft.setCursor(20, 202);
+      tft.print("PASANG WADAH UNTUK LANJUT");
+      tft.setCursor(30, 216);
+      tft.print("(Sentuh utk Stop Darurat)");
+
+      // Update teks kecepatan menjadi 0
+      tft.fillRect(20, 136, 140, 24, TFT_BLACK);
+      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.setTextSize(2);
+      tft.setCursor(20, 138);
+      tft.print("0.0 mL/s [PAUSE]");
+    } else {
+      // TAMPILAN SAAT WADAH DIPASANG KEMBALI (RESUME)
+      tft.fillRect(10, 34, 220, 16, TFT_BLACK);
+      tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+      tft.setTextSize(1);
+      tft.setCursor(20, 36);
+      tft.print("Mohon Tunggu, Air Sedang Mengalir...");
+
+      // Kembalikan tombol STOP merah
+      tft.fillRoundRect(15, 196, 210, 34, 6, TFT_RED);
+      tft.drawRoundRect(15, 196, 210, 34, 6, TFT_RED);
+      tft.setTextColor(TFT_WHITE, TFT_RED);
+      tft.setTextSize(1);
+      tft.setCursor(45, 208);
+      tft.print("[ STOP DARURAT / BATAL ]");
+    }
+  }
+
+  // 2. Update Angka Volume jika bertambah
   if (dispensedMl != lastMlShown) {
     lastMlShown = dispensedMl;
 
@@ -718,11 +814,13 @@ inline void updateDispensingAnimation(unsigned long dispensedMl, unsigned long t
     tft.setCursor(20, 96);
     tft.printf("%lu mL", dispensedMl);
 
-    tft.fillRect(20, 136, 140, 24, TFT_BLACK);
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.setTextSize(2);
-    tft.setCursor(20, 138);
-    tft.printf("%.1f mL/s", pumpFlowRateMlPerSec);
+    if (!isDispensePaused) {
+      tft.fillRect(20, 136, 140, 24, TFT_BLACK);
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.setTextSize(2);
+      tft.setCursor(20, 138);
+      tft.printf("%.1f mL/s", pumpFlowRateMlPerSec);
+    }
 
     // Progress Bar Horizontal
     int targetW = (int)(pct * 206.0f);
@@ -734,26 +832,28 @@ inline void updateDispensingAnimation(unsigned long dispensedMl, unsigned long t
     }
   }
 
-  // 2. Animasi Air Mengalir & Ketinggian Level Wadah setiap 150 ms
-  if (now - lastAnimationTime >= 150) {
-    lastAnimationTime = now;
-    animationFrame = (animationFrame + 1) % 4;
+  // 3. Animasi Air Mengalir (HANYA saat tidak dijeda)
+  if (!isDispensePaused) {
+    if (now - lastAnimationTime >= 150) {
+      lastAnimationTime = now;
+      animationFrame = (animationFrame + 1) % 4;
 
-    // Bersihkan jalur tetesan air corong (Y: 76) ke dasar (Y: 154)
-    tft.fillRect(193, 76, 4, 76, TFT_BLACK);
+      // Bersihkan jalur tetesan air corong (Y: 76) ke dasar (Y: 154)
+      tft.fillRect(193, 76, 4, 76, TFT_BLACK);
 
-    // Tetesan air berurutan
-    int dropY1 = 80 + (animationFrame * 8);
-    int dropY2 = 110 + (animationFrame * 8);
-    tft.fillCircle(195, dropY1, 2, TFT_CYAN);
-    tft.fillCircle(195, dropY2, 2, TFT_CYAN);
+      // Tetesan air berurutan
+      int dropY1 = 80 + (animationFrame * 8);
+      int dropY2 = 110 + (animationFrame * 8);
+      tft.fillCircle(195, dropY1, 2, TFT_CYAN);
+      tft.fillCircle(195, dropY2, 2, TFT_CYAN);
 
-    // Animasi ketinggian air wadah
-    int maxWaterH = 74;
-    int curWaterH = (int)(pct * maxWaterH);
-    if (curWaterH > 0) {
-      tft.fillRect(172, 154 - curWaterH, 46, curWaterH, TFT_BLUE);
-      tft.drawFastHLine(172, 154 - curWaterH, 46, TFT_CYAN);
+      // Animasi ketinggian air wadah
+      int maxWaterH = 74;
+      int curWaterH = (int)(pct * maxWaterH);
+      if (curWaterH > 0) {
+        tft.fillRect(172, 154 - curWaterH, 46, curWaterH, TFT_BLUE);
+        tft.drawFastHLine(172, 154 - curWaterH, 46, TFT_CYAN);
+      }
     }
   }
 }
