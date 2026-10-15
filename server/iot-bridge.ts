@@ -1,3 +1,4 @@
+import "dotenv/config";
 import mqtt from "mqtt";
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "../lib/prisma";

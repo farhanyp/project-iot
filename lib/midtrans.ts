@@ -1,3 +1,4 @@
+import "dotenv/config";
 import crypto from "crypto";
 
 const MIDTRANS_SERVER_KEY = (process.env.MIDTRANS_SERVER_KEY || "").trim();

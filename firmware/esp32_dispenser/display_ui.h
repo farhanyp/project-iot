@@ -301,27 +301,41 @@ inline void initDisplayDriver() {
 // Variabel internal koordinat QR Code
 static int s_qr_x = 0;
 static int s_qr_y = 0;
-static int s_qr_scale = 4;
+static int s_qr_scale = 3;
 
 static void renderQRToTFT(esp_qrcode_handle_t qrh) {
   int size = esp_qrcode_get_size(qrh);
   if (size <= 0) return;
 
-  // Hitung skala otomatis agar QR Code tampil maksimal & mudah dibaca kamera HP
-  int optimalScale = (DISP_WIDTH - 12) / size;
+  // Batasi dimensi maksimum QR code agar TIDAK MENABRAK kotak countdown di bawahnya
+  // Pada layar 240x320: Area aman antara Header (Y=24) dan Countdown (Y=250) adalah 224px.
+  // Dengan maxAllowedDim = 174px dan Quiet Zone = 10px, total kartu putih = 194px (pas di tengah).
+  int maxAllowedDim = 174;
+  int optimalScale = maxAllowedDim / size;
   if (optimalScale < 1) optimalScale = 1;
+  if (optimalScale > 4) optimalScale = 4;
   s_qr_scale = optimalScale;
 
   int qrSize = size * s_qr_scale;
-  int actualX = (DISP_WIDTH - qrSize) / 2;
-  if (actualX < 4) actualX = 4;
-  s_qr_x = actualX;
+  int quietZone = 10; // Margin putih standar (minimal 4 modul)
+  int totalCardSize = qrSize + (quietZone * 2);
+
+  // Pusatkan posisi kartu putih tepat di tengah layar secara horizontal dan vertikal
+  int cardX = (DISP_WIDTH - totalCardSize) / 2;
+  int cardY = 26 + (222 - totalCardSize) / 2;
+  if (cardY < 24) cardY = 24;
+
+  s_qr_x = cardX + quietZone;
+  s_qr_y = cardY + quietZone;
+
+  Serial.printf("[QR] Render: Modul=%dx%d, Skala=%d, QR=%dx%d px, Kartu Putih=%dx%d px di (%d, %d)\n",
+                size, size, s_qr_scale, qrSize, qrSize, totalCardSize, totalCardSize, cardX, cardY);
 
   // Kunci transaksi SPI untuk transfer super cepat (< 5 milidetik)
   tft.startWrite();
 
-  // Background putih penuh (Quiet Zone)
-  tft.fillRect(s_qr_x - 4, s_qr_y - 4, qrSize + 8, qrSize + 8, TFT_WHITE);
+  // Background putih penuh (Quiet Zone) dengan sudut rounded rapi dan kontras tinggi
+  tft.fillRoundRect(cardX, cardY, totalCardSize, totalCardSize, 6, TFT_WHITE);
 
   // Gambar modul hitam baris horizontal (run-length compression)
   for (int y = 0; y < size; y++) {
@@ -343,6 +357,8 @@ static void renderQRToTFT(esp_qrcode_handle_t qrh) {
 }
 
 inline void drawQR(const char* text, int xOffset, int yOffset) {
+  if (text == NULL || strlen(text) == 0) return;
+
   s_qr_x = xOffset;
   s_qr_y = yOffset;
 
@@ -351,9 +367,12 @@ inline void drawQR(const char* text, int xOffset, int yOffset) {
   cfg.max_qrcode_version = 16;
   cfg.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;
 
+  Serial.printf("[QR] Memulai generate QR code untuk teks (%d karakter)...\n", strlen(text));
   esp_err_t res = esp_qrcode_generate(&cfg, text);
   if (res != ESP_OK) {
     Serial.printf("[QR] Gagal men-generate QR Code! (Error: %d, Length: %d)\n", res, strlen(text));
+  } else {
+    Serial.println("[QR] QR Code berhasil digambar dengan kontras tinggi & Quiet Zone aman!");
   }
 }
 
@@ -513,8 +532,8 @@ inline void showQRISScreen(const char* nominal, const char* qrPayload, unsigned 
   drawQR(qrPayload, 0, qrY);
 
   // 3. Frame Kotak Countdown Timer (Y: 248 - 286 pada layar 320px)
-  int boxY = (DISP_HEIGHT > 240) ? 248 : 208;
-  int boxH = (DISP_HEIGHT > 240) ? 36 : 28;
+  int boxY = (DISP_HEIGHT > 240) ? 252 : 208;
+  int boxH = (DISP_HEIGHT > 240) ? 34 : 28;
 
   tft.fillRoundRect(8, boxY, 224, boxH, 6, 0x08A9);
   tft.drawRoundRect(8, boxY, 224, boxH, 6, TFT_CYAN);
@@ -548,8 +567,8 @@ inline void updateQRISCountdown(unsigned long remainingSeconds) {
   unsigned long mins = remainingSeconds / 60;
   unsigned long secs = remainingSeconds % 60;
 
-  int boxY = (DISP_HEIGHT > 240) ? 248 : 208;
-  int boxH = (DISP_HEIGHT > 240) ? 36 : 28;
+  int boxY = (DISP_HEIGHT > 240) ? 252 : 208;
+  int boxH = (DISP_HEIGHT > 240) ? 34 : 28;
 
   uint16_t borderColor = (remainingSeconds <= 30) ? TFT_RED : ((remainingSeconds <= 60) ? TFT_YELLOW : TFT_CYAN);
   uint16_t textColor = (remainingSeconds <= 30) ? TFT_RED : TFT_WHITE;
