@@ -5,6 +5,7 @@
 #include "flow_calculator.h"
 #include "proximity_sensor.h"
 #include "buzzer_control.h"
+#include "scale_sensor.h"
 
 // ==============================================================================
 // MODUL JARINGAN WIFI & PROTOKOL MQTT IOT (CORE 0 DEDICATED TASK)
@@ -368,6 +369,66 @@ inline void mqttCallback(char* topic, byte* message, unsigned int length) {
     int count = (cntStr.length() > 0) ? cntStr.toInt() : 1;
     beepPattern(count);
   }
+
+  // Perintah 12: TARE (Nolkan Timbangan dari Web)
+  else if (action == "TARE") {
+    Serial.println("[MQTT Core 0] Menerima perintah TARE dari Web");
+    NetToUIMessage netMsg;
+    memset(&netMsg, 0, sizeof(netMsg));
+    netMsg.type = NET_MSG_CMD_TARE;
+    if (qNetToUI != NULL) {
+      xQueueSend(qNetToUI, &netMsg, 0);
+    }
+  }
+
+  // Perintah 13: CALIBRATE (Kalibrasi Beban Acuan dari Web)
+  else if (action == "CALIBRATE") {
+    String kwStr = extractJsonValue(messageStr, "knownWeight");
+    float kw = (kwStr.length() > 0) ? kwStr.toFloat() : 200.0f;
+    Serial.printf("[MQTT Core 0] Menerima perintah CALIBRATE dari Web (Beban: %.1f g)\n", kw);
+    NetToUIMessage netMsg;
+    memset(&netMsg, 0, sizeof(netMsg));
+    netMsg.type = NET_MSG_CMD_CALIBRATE;
+    netMsg.floatVal = kw;
+    if (qNetToUI != NULL) {
+      xQueueSend(qNetToUI, &netMsg, 0);
+    }
+  }
+
+  // Perintah 14: SET_CAL_FACTOR (Ubah Faktor Kalibrasi Manual dari Web)
+  else if (action == "SET_CAL_FACTOR") {
+    String fStr = extractJsonValue(messageStr, "factor");
+    float f = (fStr.length() > 0) ? fStr.toFloat() : calibrationFactor;
+    Serial.printf("[MQTT Core 0] Menerima perintah SET_CAL_FACTOR dari Web (Faktor: %.2f)\n", f);
+    NetToUIMessage netMsg;
+    memset(&netMsg, 0, sizeof(netMsg));
+    netMsg.type = NET_MSG_CMD_SET_CAL_FACTOR;
+    netMsg.floatVal = f;
+    if (qNetToUI != NULL) {
+      xQueueSend(qNetToUI, &netMsg, 0);
+    }
+  }
+
+  // Perintah 15: SET_MAX_WEIGHT (Ubah Batas Beban Maksimal dari Web)
+  else if (action == "SET_MAX_WEIGHT") {
+    String mwStr = extractJsonValue(messageStr, "maxWeight");
+    float mw = (mwStr.length() > 0) ? mwStr.toFloat() : 2500.0f;
+    Serial.printf("[MQTT Core 0] Menerima perintah SET_MAX_WEIGHT dari Web (Batas: %.0f g)\n", mw);
+    NetToUIMessage netMsg;
+    memset(&netMsg, 0, sizeof(netMsg));
+    netMsg.type = NET_MSG_CMD_SET_MAX_WEIGHT;
+    netMsg.floatVal = mw;
+    if (qNetToUI != NULL) {
+      xQueueSend(qNetToUI, &netMsg, 0);
+    }
+  }
+
+  // Perintah 16: RESET_WIFI (Reset Wi-Fi & Buka Hotspot dari Web)
+  else if (action == "RESET_WIFI") {
+    Serial.println("[MQTT Core 0] Menerima perintah RESET_WIFI dari Web!");
+    beepPattern(3);
+    resetWiFiSettings();
+  }
 }
 
 // Menghubungkan ulang ke Broker MQTT secara NON-BLOCKING pada Core 0
@@ -435,6 +496,14 @@ inline void processOutgoingUIMessages() {
                        String(",\"status\":\"DISPENSING\"") + 
                        String(",\"cutOffMode\":\"CALIBRATED_FLOW_TIMER\"") + 
                        String(",\"transactionId\":\"") + String(uiMsg.orderId) + "\"" +
+                       String(",\"currentWeight\":") + String(uiMsg.currentWeight, 1) + 
+                       String(",\"weightGrams\":") + String(uiMsg.dispensedWeightGrams, 1) + 
+                       String(",\"containerWeight\":") + String(uiMsg.containerTareWeight, 1) + 
+                       String(",\"grossWeight\":") + String(uiMsg.grossWeight, 1) + 
+                       String(",\"calFactor\":") + String(uiMsg.calFactor, 2) + 
+                       String(",\"maxWeightLimit\":") + String(maxWeightLimit, 0) + 
+                       String(",\"isScaleReady\":") + (uiMsg.isScaleReady ? "true" : "false") + 
+                       String(",\"scaleStatus\":\"") + (uiMsg.isScaleReady ? "CONNECTED" : "DISCONNECTED") + "\"" + 
                        String(",\"isTumblerPresent\":") + (isTumblerPresent ? "true" : "false") + 
                        String(",\"buzzerAlarmEnabled\":") + (isBuzzerAlarmEnabled ? "true" : "false") + 
                        String(",\"isBuzzerSounding\":") + (isBuzzerSounding ? "true" : "false") + 
@@ -460,6 +529,14 @@ inline void processOutgoingUIMessages() {
                        String(",\"flowRateMlPerSec\":") + String(pumpFlowRateMlPerSec, 2) + 
                        String(",\"cutOffMode\":\"CALIBRATED_FLOW_TIMER\"") + 
                        String(",\"dispensedMl\":0,\"targetMl\":0,\"flowRate\":0.0") + 
+                       String(",\"currentWeight\":") + String(uiMsg.currentWeight, 1) + 
+                       String(",\"weightGrams\":0.0") + 
+                       String(",\"containerWeight\":") + String(uiMsg.containerTareWeight, 1) + 
+                       String(",\"grossWeight\":") + String(uiMsg.grossWeight, 1) + 
+                       String(",\"calFactor\":") + String(uiMsg.calFactor, 2) + 
+                       String(",\"maxWeightLimit\":") + String(maxWeightLimit, 0) + 
+                       String(",\"isScaleReady\":") + (uiMsg.isScaleReady ? "true" : "false") + 
+                       String(",\"scaleStatus\":\"") + (uiMsg.isScaleReady ? "CONNECTED" : "DISCONNECTED") + "\"" + 
                        String(",\"isTumblerPresent\":") + (isTumblerPresent ? "true" : "false") + 
                        String(",\"buzzerAlarmEnabled\":") + (isBuzzerAlarmEnabled ? "true" : "false") + 
                        String(",\"isBuzzerSounding\":") + (isBuzzerSounding ? "true" : "false") + 

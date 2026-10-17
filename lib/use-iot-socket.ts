@@ -400,6 +400,14 @@ export function useIoTSocket(customWsUrl?: string) {
     [sendCommand]
   );
 
+  // Helper function untuk Mereset Pengaturan Wi-Fi ESP32
+  const sendResetWiFi = useCallback(
+    (deviceId = "DISPENSER-01") => {
+      return sendCommand("RESET_WIFI", { deviceId });
+    },
+    [sendCommand]
+  );
+
   return {
     isConnected,
     mqttConnected,
@@ -418,5 +426,6 @@ export function useIoTSocket(customWsUrl?: string) {
     sendTestBuzzer,
     sendSetFlowRate,
     sendCalibratePump,
+    sendResetWiFi,
   };
 }

@@ -25,7 +25,7 @@ interface PaymentOrder {
 }
 
 const DEFAULT_PACKAGES: PackageItem[] = [
-  { code: "CUP_250ML", name: "Gelas Mini", volumeMl: 250, price: 2500 },
+  { code: "CUP_200ML", name: "Gelas Kecil", volumeMl: 200, price: 2000 },
   { code: "BOTTLE_600ML", name: "Botol Sedang", volumeMl: 600, price: 6000 },
   { code: "GALLON_1500ML", name: "Botol Besar", volumeMl: 1500, price: 15000 },
 ];
@@ -49,7 +49,7 @@ export default function Home() {
   const [packages, setPackages] = useState<PackageItem[]>(DEFAULT_PACKAGES);
   const [selectedVolume, setSelectedVolume] = useState<number>(600);
   const [customVolume, setCustomVolume] = useState<string>("");
-  const [knownWeight, setKnownWeight] = useState<string>("500");
+  const [knownWeight, setKnownWeight] = useState<string>("200");
   const [calFactorInput, setCalFactorInput] = useState<string>("-420.0");
   const [maxWeightLimitInput, setMaxWeightLimitInput] = useState<string>("2500");
   const [feedback, setFeedback] = useState<string | null>(null);

@@ -8,6 +8,7 @@
 #include <XPT2046_Touchscreen.h> // Library Touch Screen XPT2046
 #include <SPI.h>
 #include <qrcode.h>
+#include <HX711.h>            // Library Load Cell HX711 oleh bogde
 
 // ==============================================================================
 // 1. DEFINISI PIN PERANGKAT KERAS (HARDWARE PINOUT)
@@ -37,6 +38,10 @@ const int PIN_TRIGGER_RESET_WIFI = 0;  // GPIO 0 (Tombol BOOT ESP32)
 const int PIN_ULTRASONIC_TRIG    = 25; // GPIO 25 (Output Trigger Pulsa HC-SR04)
 const int PIN_ULTRASONIC_ECHO    = 26; // GPIO 26 (Input Echo Pantulan HC-SR04)
 const int PIN_BUZZER             = 27; // GPIO 27 (Kaki Positif Buzzer)
+
+// Pin Sensor Timbangan Load Cell 5kg + Modul ADC HX711
+const int PIN_HX711_DT           = 16; // GPIO 16 (DT / Data)
+const int PIN_HX711_SCK          = 4;  // GPIO 4  (SCK / Clock)
 
 #define RELAY_ACTIVE_STATE LOW
 
@@ -82,7 +87,12 @@ enum NetToUIMsgType {
   NET_MSG_PACKAGES_UPDATED,
   NET_MSG_CMD_START,
   NET_MSG_CMD_STOP,
-  NET_MSG_CMD_RESET
+  NET_MSG_CMD_RESET,
+  NET_MSG_CMD_TARE,
+  NET_MSG_CMD_CALIBRATE,
+  NET_MSG_CMD_SET_CAL_FACTOR,
+  NET_MSG_CMD_SET_MAX_WEIGHT,
+  NET_MSG_CMD_RESET_WIFI
 };
 
 struct NetToUIMessage {
@@ -92,6 +102,7 @@ struct NetToUIMessage {
   char nominal[16];
   char qrPayload[512];
   unsigned long timeoutSeconds;
+  float floatVal; // Digunakan untuk knownWeight, calFactor, maxWeight
 };
 
 // Pesan dari UI Task (Core 1) ke Network Task (Core 0)
@@ -116,6 +127,13 @@ struct UIToNetMessage {
   unsigned long targetMl;
   float flowRateLpm;
   float flowRateMlPerSec;
+  // Field Tambahan Sensor Berat Load Cell HX711
+  float currentWeight;
+  float dispensedWeightGrams;
+  float containerTareWeight;
+  float grossWeight;
+  float calFactor;
+  bool isScaleReady;
 };
 
 // Handle Antrean FreeRTOS
@@ -212,3 +230,21 @@ extern bool sensorActiveHigh;
 extern volatile unsigned long buzzerBeepUntil;
 extern volatile int buzzerBeepCountRemaining;
 extern volatile unsigned long buzzerNextBeepTime;
+
+// Variabel Kontrol Sensor Berat Load Cell 5kg + HX711
+extern HX711 scale;
+extern bool isScaleReady;
+extern float calibrationFactor;
+extern float currentLiveWeight;
+extern float dispensedWeightGrams;
+extern float containerTareWeight;
+extern long lastRawAdcReading;
+extern float maxWeightLimit;
+
+// Variabel Auto-Tare & Kontrol Pengisian Berbasis Berat
+extern bool isAutoTareDone;
+extern unsigned long tareStabilityStartTime;
+extern float lastTareCandidateWeight;
+extern unsigned long pauseStartTime;
+extern unsigned long dryRunCheckStartTime;
+extern float dryRunInitialWeight;
