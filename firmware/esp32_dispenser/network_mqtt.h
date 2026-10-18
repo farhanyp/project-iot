@@ -5,7 +5,6 @@
 #include "flow_calculator.h"
 #include "proximity_sensor.h"
 #include "buzzer_control.h"
-#include "scale_sensor.h"
 
 // ==============================================================================
 // MODUL JARINGAN WIFI & PROTOKOL MQTT IOT (CORE 0 DEDICATED TASK)
@@ -185,8 +184,10 @@ inline void setupWiFiManager() {
     delay(1000);
   }
 
-  // Tampilkan UI Boot WiFi
+  // Tampilkan UI Boot WiFi & Aktifkan Buzzer saat belum terhubung ke Wi-Fi
   showBootWifiScreen("", "", "Menghubungkan Wi-Fi...");
+  startContinuousBuzzer(); // Bunyikan buzzer saat belum terhubung ke Wi-Fi
+
   wm.setConfigPortalTimeout(180);
   bool res = wm.autoConnect("WaterVend-Setup");
 
@@ -196,8 +197,12 @@ inline void setupWiFiManager() {
     res = wm.startConfigPortal("WaterVend-Setup");
   }
 
+  // Begitu berhasil terhubung ke Wi-Fi -> Matikan Buzzer seketika!
+  stopContinuousBuzzer();
+
   if (!res) {
     Serial.println("[WiFiManager] Gagal setup. Merestart ESP32...");
+    stopBuzzer();
     delay(2000);
     ESP.restart();
   }
@@ -215,6 +220,9 @@ inline void setupWiFiManager() {
   Serial.println(WiFi.SSID());
   Serial.print("[Wi-Fi] IP ESP32: ");
   Serial.println(WiFi.localIP());
+
+  stopBuzzer();
+  beepOnce(120); // 1 Bip konfirmasi sukses terhubung ke Wi-Fi
 
   showBootWifiScreen(WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), "Terhubung [OK]");
   delay(800);
@@ -425,94 +433,11 @@ inline void mqttCallback(char* topic, byte* message, unsigned int length) {
     beepPattern(count);
   }
 
-  // Perintah 12: TARE (Nolkan Timbangan dari Web)
-  else if (action == "TARE") {
-    Serial.println("[MQTT Core 0] Menerima perintah TARE dari Web");
-    NetToUIMessage netMsg;
-    memset(&netMsg, 0, sizeof(netMsg));
-    netMsg.type = NET_MSG_CMD_TARE;
-    if (qNetToUI != NULL) {
-      xQueueSend(qNetToUI, &netMsg, 0);
-    }
-  }
-
-  // Perintah 13: CALIBRATE (Kalibrasi Beban Acuan dari Web)
-  else if (action == "CALIBRATE") {
-    String kwStr = extractJsonValue(messageStr, "knownWeight");
-    float kw = (kwStr.length() > 0) ? kwStr.toFloat() : 200.0f;
-    Serial.printf("[MQTT Core 0] Menerima perintah CALIBRATE dari Web (Beban: %.1f g)\n", kw);
-    NetToUIMessage netMsg;
-    memset(&netMsg, 0, sizeof(netMsg));
-    netMsg.type = NET_MSG_CMD_CALIBRATE;
-    netMsg.floatVal = kw;
-    if (qNetToUI != NULL) {
-      xQueueSend(qNetToUI, &netMsg, 0);
-    }
-  }
-
-  // Perintah 14: SET_CAL_FACTOR (Ubah Faktor Kalibrasi Manual dari Web)
-  else if (action == "SET_CAL_FACTOR") {
-    String fStr = extractJsonValue(messageStr, "factor");
-    float f = (fStr.length() > 0) ? fStr.toFloat() : calibrationFactor;
-    Serial.printf("[MQTT Core 0] Menerima perintah SET_CAL_FACTOR dari Web (Faktor: %.2f)\n", f);
-    NetToUIMessage netMsg;
-    memset(&netMsg, 0, sizeof(netMsg));
-    netMsg.type = NET_MSG_CMD_SET_CAL_FACTOR;
-    netMsg.floatVal = f;
-    if (qNetToUI != NULL) {
-      xQueueSend(qNetToUI, &netMsg, 0);
-    }
-  }
-
-  // Perintah 15: SET_MAX_WEIGHT (Ubah Batas Beban Maksimal dari Web)
-  else if (action == "SET_MAX_WEIGHT") {
-    String mwStr = extractJsonValue(messageStr, "maxWeight");
-    float mw = (mwStr.length() > 0) ? mwStr.toFloat() : 2500.0f;
-    Serial.printf("[MQTT Core 0] Menerima perintah SET_MAX_WEIGHT dari Web (Batas: %.0f g)\n", mw);
-    NetToUIMessage netMsg;
-    memset(&netMsg, 0, sizeof(netMsg));
-    netMsg.type = NET_MSG_CMD_SET_MAX_WEIGHT;
-    netMsg.floatVal = mw;
-    if (qNetToUI != NULL) {
-      xQueueSend(qNetToUI, &netMsg, 0);
-    }
-  }
-
-  // Perintah 16: RESET_WIFI (Reset Wi-Fi & Buka Hotspot dari Web)
+  // Perintah 12: RESET_WIFI (Reset Wi-Fi & Buka Hotspot dari Web)
   else if (action == "RESET_WIFI") {
     Serial.println("[MQTT Core 0] Menerima perintah RESET_WIFI dari Web!");
     beepPattern(3);
     resetWiFiSettings();
-  }
-
-  // Perintah 17: SET_OFFSET (Atur Early Cut-off Offset dari Web)
-  else if (action == "SET_OFFSET" || action == "SET_CUTOFF_OFFSET") {
-    String offStr = extractJsonValue(messageStr, "offset");
-    if (offStr.length() == 0) offStr = extractJsonValue(messageStr, "value");
-    float off = (offStr.length() > 0) ? offStr.toFloat() : 15.0f;
-    Serial.printf("[MQTT Core 0] Menerima perintah SET_OFFSET dari Web (Offset: %.1f g)\n", off);
-    NetToUIMessage netMsg;
-    memset(&netMsg, 0, sizeof(netMsg));
-    netMsg.type = NET_MSG_CMD_SET_OFFSET;
-    netMsg.floatVal = off;
-    if (qNetToUI != NULL) {
-      xQueueSend(qNetToUI, &netMsg, 0);
-    }
-  }
-
-  // Perintah 18: SET_BIAS (Atur Safety Margin Bias dari Web)
-  else if (action == "SET_BIAS" || action == "SET_SAFETY_BIAS") {
-    String biasStr = extractJsonValue(messageStr, "bias");
-    if (biasStr.length() == 0) biasStr = extractJsonValue(messageStr, "value");
-    float bias = (biasStr.length() > 0) ? biasStr.toFloat() : 1.0f;
-    Serial.printf("[MQTT Core 0] Menerima perintah SET_BIAS dari Web (Bias: %.1f g)\n", bias);
-    NetToUIMessage netMsg;
-    memset(&netMsg, 0, sizeof(netMsg));
-    netMsg.type = NET_MSG_CMD_SET_BIAS;
-    netMsg.floatVal = bias;
-    if (qNetToUI != NULL) {
-      xQueueSend(qNetToUI, &netMsg, 0);
-    }
   }
 }
 
@@ -582,22 +507,11 @@ inline void processOutgoingUIMessages() {
                        String(",\"status\":\"DISPENSING\"") + 
                        String(",\"cutOffMode\":\"CALIBRATED_FLOW_TIMER\"") + 
                        String(",\"transactionId\":\"") + String(uiMsg.orderId) + "\"" +
-                       String(",\"currentWeight\":") + String(uiMsg.currentWeight, 1) + 
-                       String(",\"weightGrams\":") + String(uiMsg.dispensedWeightGrams, 1) + 
-                       String(",\"containerWeight\":") + String(uiMsg.containerTareWeight, 1) + 
-                       String(",\"grossWeight\":") + String(uiMsg.grossWeight, 1) + 
-                       String(",\"calFactor\":") + String(uiMsg.calFactor, 2) + 
-                       String(",\"maxWeightLimit\":") + String(maxWeightLimit, 0) + 
-                       String(",\"isScaleReady\":") + (uiMsg.isScaleReady ? "true" : "false") + 
-                       String(",\"scaleStatus\":\"") + (uiMsg.isScaleReady ? "CONNECTED" : "DISCONNECTED") + "\"" + 
                        String(",\"isTumblerPresent\":") + (isTumblerPresent ? "true" : "false") + 
                        String(",\"buzzerAlarmEnabled\":") + (isBuzzerAlarmEnabled ? "true" : "false") + 
                        String(",\"isBuzzerSounding\":") + (isBuzzerSounding ? "true" : "false") + 
-                        String(",\"targetDistanceCm\":") + String(targetDistanceCm, 1) + 
-                        String(",\"currentDistanceCm\":") + String(currentMeasuredDistanceCm, 1) + 
-                        String(",\"cutoffOffset\":") + String(dispenseEarlyOffsetGrams, 1) + 
-                        String(",\"safetyBias\":") + String(targetSafetyBiasGrams, 1) + 
-                        String(",\"effectiveTarget\":") + String(max(0.0f, (float)uiMsg.targetMl - targetSafetyBiasGrams), 1) + "}";
+                       String(",\"targetDistanceCm\":") + String(targetDistanceCm, 1) + 
+                       String(",\"currentDistanceCm\":") + String(currentMeasuredDistanceCm, 1) + "}";
       mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
     }
     else if (uiMsg.type == UI_MSG_COMPLETE) {
@@ -609,7 +523,14 @@ inline void processOutgoingUIMessages() {
       mqttClient.publish(topicComplete.c_str(), completePayload.c_str());
 
       String topicStatus = String("water/dispenser/") + DEVICE_ID + "/status";
-      mqttClient.publish(topicStatus.c_str(), "{\"status\":\"READY\"}", true);
+      bool isFail = (strcmp(uiMsg.statusStr, "FAILED") == 0 ||
+                     strcmp(uiMsg.statusStr, "FAILED_AIR_HABIS") == 0 || 
+                     strcmp(uiMsg.statusStr, "AIR_HABIS") == 0);
+      if (isFail) {
+        mqttClient.publish(topicStatus.c_str(), "{\"status\":\"ERROR\",\"error\":\"AIR_HABIS\"}", true);
+      } else {
+        mqttClient.publish(topicStatus.c_str(), "{\"status\":\"READY\"}", true);
+      }
       Serial.printf("[MQTT Core 0] Selesai pengisian terkirim: %s (%lu mL, Order: %s)\n", uiMsg.statusStr, uiMsg.dispensedMl, uiMsg.orderId);
     }
     else if (uiMsg.type == UI_MSG_STATUS_READY) {
@@ -618,23 +539,17 @@ inline void processOutgoingUIMessages() {
                        String(",\"flowRateMlPerSec\":") + String(pumpFlowRateMlPerSec, 2) + 
                        String(",\"cutOffMode\":\"CALIBRATED_FLOW_TIMER\"") + 
                        String(",\"dispensedMl\":0,\"targetMl\":0,\"flowRate\":0.0") + 
-                       String(",\"currentWeight\":") + String(uiMsg.currentWeight, 1) + 
-                       String(",\"weightGrams\":0.0") + 
-                       String(",\"containerWeight\":") + String(uiMsg.containerTareWeight, 1) + 
-                       String(",\"grossWeight\":") + String(uiMsg.grossWeight, 1) + 
-                       String(",\"calFactor\":") + String(uiMsg.calFactor, 2) + 
-                       String(",\"maxWeightLimit\":") + String(maxWeightLimit, 0) + 
-                       String(",\"isScaleReady\":") + (uiMsg.isScaleReady ? "true" : "false") + 
-                       String(",\"scaleStatus\":\"") + (uiMsg.isScaleReady ? "CONNECTED" : "DISCONNECTED") + "\"" + 
                        String(",\"isTumblerPresent\":") + (isTumblerPresent ? "true" : "false") + 
                        String(",\"buzzerAlarmEnabled\":") + (isBuzzerAlarmEnabled ? "true" : "false") + 
                        String(",\"isBuzzerSounding\":") + (isBuzzerSounding ? "true" : "false") + 
                        String(",\"targetDistanceCm\":") + String(targetDistanceCm, 1) + 
-                       String(",\"currentDistanceCm\":") + String(currentMeasuredDistanceCm, 1) + 
-                       String(",\"cutoffOffset\":") + String(dispenseEarlyOffsetGrams, 1) + 
-                       String(",\"safetyBias\":") + String(targetSafetyBiasGrams, 1) + 
-                       String(",\"effectiveTarget\":") + String(max(0.0f, (float)targetMilliLitres - targetSafetyBiasGrams), 1) + "}";
+                       String(",\"currentDistanceCm\":") + String(currentMeasuredDistanceCm, 1) + "}";
       mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
+    }
+    else if (uiMsg.type == UI_MSG_GET_PACKAGES) {
+      String topicGet = String("water/dispenser/") + DEVICE_ID + "/get_packages";
+      mqttClient.publish(topicGet.c_str(), "{\"action\":\"GET_PACKAGES\"}");
+      Serial.println("[MQTT Core 0] Permintaan sinkronisasi paket (get_packages) terkirim ke Broker!");
     }
   }
 }

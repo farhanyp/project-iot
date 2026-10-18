@@ -2,8 +2,8 @@
 #include "config.h"
 
 // ==============================================================================
-// DRIVER BUZZER & ALARM DETEKSI JANGKAUAN SENSOR E18-B03P1
-// (Thread-Safe Non-blocking State Machine, Audio Feedback, & Alarm)
+// DRIVER BUZZER & FEEDBACK AUDIO SISTEM
+// (Thread-Safe Non-blocking State Machine, Audio Feedback, & Touch Tick)
 // ==============================================================================
 
 inline void stopBuzzer() {
@@ -16,13 +16,13 @@ inline void stopBuzzer() {
 inline void initBuzzer() {
   pinMode(PIN_BUZZER, OUTPUT);
   digitalWrite(PIN_BUZZER, LOW);
+  isBuzzerSounding = false;
 
   preferences.begin("wv_buzzer", false);
-  isBuzzerAlarmEnabled = preferences.getBool("alarm_on", true); // Default alarm aktif
+  isBuzzerAlarmEnabled = preferences.getBool("alarm_on", true);
   preferences.end();
 
-  Serial.printf("[BUZZER] Inisialisasi: Pin GPIO %d | Alarm Sensor: %s\n",
-                PIN_BUZZER, isBuzzerAlarmEnabled ? "ON (AKTIF)" : "OFF (SENYAP)");
+  Serial.printf("[BUZZER] Inisialisasi: Pin GPIO %d | Status Awal: SENYAP (LOW)\n", PIN_BUZZER);
 }
 
 inline void setBuzzerAlarmEnabled(bool enabled) {
@@ -39,30 +39,48 @@ inline void setBuzzerAlarmEnabled(bool enabled) {
   Serial.printf("[BUZZER] Status Alarm Diubah: %s\n", isBuzzerAlarmEnabled ? "ON (AKTIF)" : "OFF (SENYAP)");
 }
 
-// Memicu bip non-blocking (Thread-safe, dapat dipanggil dari Core 0 maupun Core 1)
-inline void triggerBuzzerBeep(int count = 1, int durationMs = 120) {
+// Memicu bip non-blocking (Thread-safe)
+inline void triggerBuzzerBeep(int count = 1, int durationMs = 40) {
   buzzerBeepCountRemaining = count;
   buzzerBeepUntil = millis() + durationMs;
-  buzzerNextBeepTime = millis() + durationMs + 80;
+  buzzerNextBeepTime = millis() + durationMs + 70;
   digitalWrite(PIN_BUZZER, HIGH);
   isBuzzerSounding = true;
 }
 
-// Bip pendek sekali
-inline void beepOnce(int durationMs = 80) {
+// Bip pendek sekali (Tactile Click saat sentuh layar)
+inline void beepOnce(int durationMs = 35) {
   triggerBuzzerBeep(1, durationMs);
 }
 
-// Pola bip berganda (Test Web)
+// Pola bip berganda (Notifikasi Sukses / Peringatan)
 inline void beepPattern(int count) {
-  triggerBuzzerBeep(count, 120);
+  triggerBuzzerBeep(count, 90);
 }
 
-// Single-Owner Update Function: Hanya dipanggil di Core 1 loop()
-inline void updateSensorBuzzerAlarm(bool tumblerDetected) {
+// Bip alarm panjang (Kondisi Kritis / Emergency Stop / Air Habis / Overload)
+inline void beepAlertLong(int durationMs = 500) {
+  triggerBuzzerBeep(1, durationMs);
+}
+
+// Bunyikan buzzer secara kontinu (misal saat belum terkoneksi WiFi)
+inline void startContinuousBuzzer() {
+  buzzerBeepCountRemaining = 0;
+  buzzerBeepUntil = 0;
+  digitalWrite(PIN_BUZZER, HIGH);
+  isBuzzerSounding = true;
+}
+
+// Matikan buzzer kontinu
+inline void stopContinuousBuzzer() {
+  stopBuzzer();
+}
+
+// State Machine Buzzer: Wajib dipanggil di SETIAP iterasi loop() di Core 1
+inline void updateBuzzer() {
   unsigned long now = millis();
 
-  // 1. Prioritas Utama: Bip Manual (Perintah Web / Feedback Sentuhan Layar / Bip Deteksi)
+  // 1. Prioritas Utama: Evaluasi antrean bip
   if (buzzerBeepCountRemaining > 0) {
     if (now < buzzerBeepUntil) {
       digitalWrite(PIN_BUZZER, HIGH);
@@ -74,8 +92,8 @@ inline void updateSensorBuzzerAlarm(bool tumblerDetected) {
       if (now >= buzzerNextBeepTime) {
         buzzerBeepCountRemaining--;
         if (buzzerBeepCountRemaining > 0) {
-          buzzerBeepUntil = now + 120;
-          buzzerNextBeepTime = now + 200;
+          buzzerBeepUntil = now + 90;
+          buzzerNextBeepTime = now + 160;
           digitalWrite(PIN_BUZZER, HIGH);
           isBuzzerSounding = true;
           return;
@@ -86,9 +104,14 @@ inline void updateSensorBuzzerAlarm(bool tumblerDetected) {
     }
   }
 
-  // 2. Jika tidak ada antrean bip: Pastikan buzzer MATI (Senyap, tidak ada alarm terus-menerus)
-  if (isBuzzerSounding) {
+  // 2. Jika tidak ada antrean bip & bukan mode kontinu, pastikan buzzer MATI (LOW)
+  if (isBuzzerSounding && buzzerBeepUntil > 0) {
     digitalWrite(PIN_BUZZER, LOW);
     isBuzzerSounding = false;
   }
+}
+
+// Kompatibilitas mundur
+inline void updateSensorBuzzerAlarm(bool tumblerDetected = true) {
+  updateBuzzer();
 }

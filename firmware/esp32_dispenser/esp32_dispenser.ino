@@ -24,7 +24,6 @@
 #include "display_ui.h"
 #include "proximity_sensor.h"
 #include "buzzer_control.h"
-#include "scale_sensor.h"
 #include "network_mqtt.h"
 
 // ==============================================================================
@@ -89,6 +88,10 @@ unsigned long lastAnimationTime       = 0;
 char activeOrderId[40]                = "";
 char activeNominalStr[16]             = "";
 char activeQrPayload[512]             = "";
+unsigned long loadingMenuStartTime    = 0;
+bool initialPackagesLoaded            = false;
+int dispenserDryRunRetryCount         = 0;
+const int MAX_DRY_RUN_RETRIES         = 2;
 
 // Variabel Kontrol Sensor Ultrasonik HC-SR04 & Buzzer
 bool isTumblerPresent                 = false;
@@ -103,29 +106,20 @@ volatile unsigned long buzzerBeepUntil        = 0;
 volatile int buzzerBeepCountRemaining         = 0;
 volatile unsigned long buzzerNextBeepTime     = 0;
 
-// Variabel Kontrol Sensor Berat Load Cell 5kg + HX711
-HX711 scale;
-bool isScaleReady                             = false;
-float calibrationFactor                       = -420.0f;
-float currentLiveWeight                       = 0.0f;
-float dispensedWeightGrams                    = 0.0f;
-float containerTareWeight                     = 0.0f;
-long lastRawAdcReading                        = 0;
-float maxWeightLimit                          = 2500.0f;
-
-// Variabel Auto-Tare & Kontrol Pengisian Berbasis Berat
-bool isAutoTareDone                           = false;
-unsigned long tareStabilityStartTime         = 0;
-float lastTareCandidateWeight                 = 0.0f;
+// Variabel Kontrol Pengisian Alur Interaktif
 unsigned long pauseStartTime                 = 0;
-unsigned long dryRunCheckStartTime            = 0;
-float dryRunInitialWeight                     = 0.0f;
 
-// Variabel Early Cut-Off Offset & Adaptive Self-Tuning (Target 199g +- 1g)
-float dispenseEarlyOffsetGrams                = 15.0f;
-float targetSafetyBiasGrams                   = 1.0f;
-unsigned long pumpStopTime                    = 0;
-bool isWaitingForSettle                       = false;
+// Variabel Pengisian Multi-Botol (Ganti Botol di Tengah Jalan)
+unsigned long totalAccumulatedMl              = 0;
+bool isSwitchingBottle                        = false;
+
+// Variabel Safety Hold Button & Smart Complete Reset
+unsigned long holdButtonStartTime             = 0;
+bool completeBottleWasRemoved                 = false;
+bool completeScreenReminderBeeped             = false;
+unsigned long completeScreenEnterTime         = 0;
+
+
 
 // ==============================================================================
 // PEMROSESAN PESAN MASUK DARI NETWORK TASK CORE 0 KE UI CORE 1
@@ -140,9 +134,10 @@ void handleIncomingNetworkMessages() {
     if (netMsg.type == NET_MSG_PAYMENT_SUCCESS) {
       targetMilliLitres = (netMsg.volumeMl > 0) ? netMsg.volumeMl : 600;
       currentTransactionId = String(netMsg.orderId);
-      resetAutoTareState();
-      containerTareWeight = 0.0f;
-      isWaitingForSettle = false;
+      dispenserDryRunRetryCount = 0;
+      totalAccumulatedMl = 0;
+      isSwitchingBottle = false;
+      beepPattern(2); // 2 Bip konfirmasi pembayaran QRIS lunas diterima!
       Serial.printf("[UI Core 1] Pembayaran Lunas! Target: %lu mL (Order: %s)\n", targetMilliLitres, netMsg.orderId);
       showPlaceTumblerScreen(targetMilliLitres, netMsg.orderId);
     }
@@ -163,7 +158,14 @@ void handleIncomingNetworkMessages() {
       qrisIgnoreTouchUntil = millis() + 2500;
     }
     else if (netMsg.type == NET_MSG_PACKAGES_UPDATED) {
-      if (currentScreen == SCREEN_STANDBY) {
+      initialPackagesLoaded = true;
+      Serial.printf("[UI Core 1] Paket menu berhasil disinkronkan (%d paket)!\n", totalPackages);
+      if (currentScreen == SCREEN_LOADING) {
+        // Tampilkan progress 100% sebelum beralih ke Standby
+        updateLoadingMenuAnimation(100);
+        delay(400);
+        showStandbyScreen();
+      } else if (currentScreen == SCREEN_STANDBY) {
         showStandbyScreen();
       }
     }
@@ -172,13 +174,11 @@ void handleIncomingNetworkMessages() {
       currentTransactionId = String(netMsg.orderId);
       requiredDispenseDurationMs = calculateDispenseDurationMs(targetMilliLitres);
       dispensedMilliLitres = 0;
-      dispensedWeightGrams = 0.0f;
+      totalAccumulatedMl = 0;
+      isSwitchingBottle = false;
       activePumpDurationMs = 0;
       lastPumpIterationMillis = millis();
       dispenseStartTime = millis();
-      dryRunCheckStartTime = millis();
-      dryRunInitialWeight = currentLiveWeight;
-      isWaitingForSettle = false;
       isDispensing = true;
       isDispensePaused = false;
 
@@ -188,39 +188,24 @@ void handleIncomingNetworkMessages() {
     else if (netMsg.type == NET_MSG_CMD_STOP) {
       isDispensing = false;
       isDispensePaused = false;
-      isWaitingForSettle = false;
+      isSwitchingBottle = false;
       stopPump();
+      beepAlertLong(500); // Alarm panjang Stop Darurat
       showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Tombol Stop Darurat Ditekan");
     }
     else if (netMsg.type == NET_MSG_CMD_RESET) {
       // HANYA reset jika bukan sedang di SCREEN_QRIS atau SCREEN_DISPENSING
       if (currentScreen != SCREEN_QRIS && currentScreen != SCREEN_DISPENSING) {
         isDispensing = false;
-        isWaitingForSettle = false;
+        isDispensePaused = false;
+        isSwitchingBottle = false;
         stopPump();
         dispensedMilliLitres = 0;
+        totalAccumulatedMl = 0;
         targetMilliLitres = 0;
         currentTransactionId = "";
         showStandbyScreen();
       }
-    }
-    else if (netMsg.type == NET_MSG_CMD_TARE) {
-      tareScale();
-    }
-    else if (netMsg.type == NET_MSG_CMD_CALIBRATE) {
-      calibrateScale(netMsg.floatVal);
-    }
-    else if (netMsg.type == NET_MSG_CMD_SET_CAL_FACTOR) {
-      saveCalibrationFactor(netMsg.floatVal);
-    }
-    else if (netMsg.type == NET_MSG_CMD_SET_MAX_WEIGHT) {
-      saveMaxWeight(netMsg.floatVal);
-    }
-    else if (netMsg.type == NET_MSG_CMD_SET_OFFSET) {
-      saveDispenseOffset(netMsg.floatVal);
-    }
-    else if (netMsg.type == NET_MSG_CMD_SET_BIAS) {
-      saveSafetyBias(netMsg.floatVal);
     }
   }
 }
@@ -229,14 +214,32 @@ void handleIncomingNetworkMessages() {
 // HANDLER SENTUHAN LAYAR TOUCH SCREEN TERPADU (TFT_eSPI Zero-Lag & Filtered)
 // ==============================================================================
 bool handleTouchScreen() {
+  static bool s_wasTouched = false;
+  static unsigned long s_lastHoldTick = 0;
   int touchX = 0, touchY = 0;
 
   // Baca sentuhan melalui fungsi terisolasi SPI XPT2046 dengan filter noise
   bool isTouched = getDisplayTouch(touchX, touchY);
-  if (!isTouched) return false;
+  if (!isTouched) {
+    s_wasTouched = false;
+    // Release detection untuk safety hold buttons (Batal QRIS & Stop Darurat)
+    if (holdButtonStartTime != 0) {
+      holdButtonStartTime = 0;
+      if (currentScreen == SCREEN_QRIS) {
+        resetCancelQRISButton();
+      } else if (currentScreen == SCREEN_DISPENSING && !isDispensePaused && !isSwitchingBottle) {
+        resetStopDispensingButton();
+      }
+    }
+    return false;
+  }
 
-  beepOnce(25); // Feedback audio sentuhan ringan (tactile tick)
-  Serial.printf("[TOUCH] X=%d, Y=%d (Screen: %d)\n", touchX, touchY, currentScreen);
+  // 1. Deteksi Klik LCD: Bunyi SEKALI saja saat pertama kali layar disentuh (Edge Detection)
+  if (!s_wasTouched) {
+    s_wasTouched = true;
+    beepOnce(35); // Feedback audio sentuhan (tactile click) bunyi sekali
+    Serial.printf("[TOUCH CLICK] X=%d, Y=%d (Screen: %d)\n", touchX, touchY, currentScreen);
+  }
 
   // ----------------------------------------------------------------------------
   // KASUS 1: Di Layar Standby (Memilih Menu Paket Air)
@@ -248,12 +251,12 @@ bool handleTouchScreen() {
     int maxCards = (totalPackages > 3) ? 3 : totalPackages;
 
     // Pembagian zona sentuh diskrit tanpa overlap (34..117, 118..199, 200..282)
-    // Sesuai dengan geometri kartu vertikal baru (Tinggi 76px + Gap 6px):
-    // Card 0: Y=38..114  -> Zona Sentuh: 34..117
-    // Card 1: Y=120..196 -> Zona Sentuh: 118..199
-    // Card 2: Y=202..278 -> Zona Sentuh: 200..282
+    // Sesuai dengan geometri kartu vertikal (Tinggi 72px + Gap 8px):
+    // Card 0: Y=40..112  -> Zona Sentuh: 34..116
+    // Card 1: Y=120..192 -> Zona Sentuh: 118..198
+    // Card 2: Y=200..272 -> Zona Sentuh: 200..280
     const int zoneYStart[3] = {34, 118, 200};
-    const int zoneYEnd[3]   = {117, 199, 282};
+    const int zoneYEnd[3]   = {116, 198, 280};
 
     for (int i = 0; i < maxCards; i++) {
       int yStart = zoneYStart[i];
@@ -268,17 +271,19 @@ bool handleTouchScreen() {
 
         beepOnce(70);
 
-        // Feedback visual tombol terpilih seketika (menyorot pill button di bawah teks)
-        int cardDrawY = 38 + i * 82;
-        tft.drawRoundRect(8, cardDrawY, 224, 76, 6, WV_SUCCESS_GREEN);
-        tft.fillRoundRect(18, cardDrawY + 44, 202, 24, 4, WV_SUCCESS_GREEN);
+        // Feedback visual tombol terpilih seketika (menyorot pill button)
+        int cardDrawY = 40 + i * 80;
+        tft.drawRoundRect(8, cardDrawY, 224, 72, 6, WV_SUCCESS_GREEN);
+        tft.fillRoundRect(18, cardDrawY + 46, 204, 20, 4, WV_SUCCESS_GREEN);
         tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
         tft.setTextSize(1);
-        tft.setCursor(65, cardDrawY + 52);
+        tft.setCursor(55, cardDrawY + 52);
         tft.print("[ OK! PAKET TERPILIH ]");
 
         activePackageIndex = i;
         targetMilliLitres = dispenserPackages[i].volumeMl;
+        totalAccumulatedMl = 0;
+        isSwitchingBottle = false;
 
         // Kirim request transaksi baru ke Core 0 (Network MQTT)
         UIToNetMessage uiMsg;
@@ -297,39 +302,39 @@ bool handleTouchScreen() {
         snprintf(nomStr, sizeof(nomStr), "%ld", dispenserPackages[i].price);
         showQRISScreen(nomStr, "00020101021226600016ID.WATERVEND.WWW520458125303360540660005802ID5913WATERVEND IOT6007BANDUNG6304ABCD", 300);
 
-        qrisIgnoreTouchUntil = millis() + 3000;
+        qrisIgnoreTouchUntil = millis() + 2500;
         return true;
       }
     }
   }
 
   // ----------------------------------------------------------------------------
-  // KASUS 2: Di Layar QRIS (Tombol Batalkan Pesanan - Anti False Trigger & Hold Debounce)
+  // KASUS 2: Di Layar QRIS (Tombol Batalkan Pesanan - Tahan 1.0 Detik dengan Progress Bar)
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_QRIS) {
     if (millis() < qrisIgnoreTouchUntil) return false;
 
-    static unsigned long cancelPressStart = 0;
+    // Batasi koordinat sentuh tombol BATAL (X: 8-232, Y: 278-320)
+    if (touchX >= 8 && touchX <= 232 && touchY >= 278 && touchY <= 320) {
+      if (holdButtonStartTime == 0) {
+        holdButtonStartTime = millis();
+        s_lastHoldTick = millis();
+      }
+      unsigned long heldMs = millis() - holdButtonStartTime;
+      int pct = (heldMs >= 1000) ? 100 : (int)((heldMs * 100) / 1000);
+      drawHoldProgressCancelQRIS(pct);
 
-    // Batasi koordinat sentuh tombol dengan toleransi empuk (X: 10-230, Y: 275-320)
-    if (touchX >= 10 && touchX <= 230 && touchY >= 275 && touchY <= 320) {
-      if (cancelPressStart == 0) {
-        cancelPressStart = millis();
-        // Beri feedback visual tombol ditekan
-        tft.fillRoundRect(8, 290, 224, 26, 4, WV_TEXT_BLACK);
-        tft.setTextColor(WV_TEXT_WHITE, WV_TEXT_BLACK);
-        tft.setTextSize(1);
-        tft.setCursor(62, 298);
-        tft.print("[ MEMBATALKAN... ]");
-        return false;
+      // Feedback suara ketika tombol DITAHAN: Bunyi tick setiap 200ms
+      if (millis() - s_lastHoldTick >= 200 && heldMs < 1000) {
+        s_lastHoldTick = millis();
+        beepOnce(25); // Bunyi saat tombol ditahan
       }
 
-      // Ditahan minimal 200ms untuk memastikan sentuhan disengaja
-      if (millis() - cancelPressStart >= 200) {
-        Serial.println("[TOUCH] Customer mengonfirmasi pembatalan pesanan QRIS.");
-        cancelPressStart = 0;
-        beepOnce(80);
-        
+      if (heldMs >= 1000) {
+        Serial.println("[TOUCH] Customer menahan tombol batal 1.0 detik. Membatalkan pesanan QRIS...");
+        holdButtonStartTime = 0;
+        beepOnce(120);
+
         // Kirim pesan pembatalan ke Core 0
         UIToNetMessage uiMsg;
         memset(&uiMsg, 0, sizeof(uiMsg));
@@ -338,82 +343,56 @@ bool handleTouchScreen() {
         if (qUIToNet != NULL) {
           xQueueSend(qUIToNet, &uiMsg, 0);
         }
-        
+
         showStandbyScreen();
         return true;
       }
+      return false; // Sedang ditahan
     } else {
-      if (cancelPressStart != 0) {
-        cancelPressStart = 0;
-        // Kembalikan tampilan tombol normal jika jari terlepas sebelum 200ms
-        tft.fillRoundRect(8, 290, 224, 26, 4, WV_DANGER_RED);
-        tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
-        tft.setTextSize(1);
-        tft.setCursor(68, 298);
-        tft.print("[ X  BATALKAN PESANAN ]");
+      if (holdButtonStartTime != 0) {
+        holdButtonStartTime = 0;
+        resetCancelQRISButton();
       }
     }
   }
 
   // ----------------------------------------------------------------------------
-  // KASUS 3: Di Layar Letakkan Tumbler (Tombol LANJUT / NEXT)
+  // KASUS 3: Di Layar Letakkan Tumbler (Tombol MULAI ISI & TIMBANG ULANG WADAH)
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_PLACE_TUMBLER) {
-    // Area sentuh tombol NEXT luas (Y: 150-224, X: 4-236)
-    if (touchY >= 150 && touchY <= 224 && touchX >= 4 && touchX <= 236) {
-      // Proteksi Keamanan 1: Cegah air tumpah jika tumbler belum diletakkan di bawah corong
+    // Area sentuh tombol MULAI ISI AIR (Y: 178-242, X: 6-234)
+    if (touchY >= 178 && touchY <= 242 && touchX >= 6 && touchX <= 234) {
+      // Proteksi Keamanan: Cegah air tumpah jika tumbler belum diletakkan di bawah corong
       if (!isTumblerPresent) {
-        Serial.println("[SAFETY] Tombol NEXT ditekan tapi tumbler belum terdeteksi di sensor!");
-        tft.fillRoundRect(8, 160, 224, 54, 8, WV_DANGER_RED);
+        Serial.println("[SAFETY] Tombol MULAI ditekan tapi tumbler belum terdeteksi di sensor!");
+        tft.fillRoundRect(8, 182, 224, 56, 8, WV_DANGER_RED);
         tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
         tft.setTextSize(2);
-        tft.setCursor(24, 176);
+        tft.setCursor(24, 194);
         tft.print("PASANG TUMBLER!");
         beepPattern(2);
         delay(600);
-        tft.fillRoundRect(8, 160, 224, 54, 8, WV_SUCCESS_GREEN);
-        tft.drawRoundRect(8, 160, 224, 54, 8, WV_HEADER_BG);
-        tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
-        tft.setTextSize(2);
-        tft.setCursor(24, 172);
-        tft.print("MULAI ISI AIR >");
-        tft.setTextSize(1);
-        tft.setCursor(28, 196);
-        tft.print("Sentuh di sini untuk mengalirkan air");
+        s_placeTumblerFirstDraw = true;
         return false;
       }
 
-      // Proteksi Keamanan 2: Pastikan proses auto-tare wadah kosong sudah stabil & selesai
-      if (!isAutoTareDone) {
-        Serial.println("[SAFETY] Tombol NEXT ditekan tapi auto-tare belum stabil/selesai!");
-        tft.fillRoundRect(8, 160, 224, 54, 8, WV_WARNING_AMBER);
-        tft.setTextColor(WV_TEXT_WHITE, WV_WARNING_AMBER);
-        tft.setTextSize(2);
-        tft.setCursor(24, 176);
-        tft.print("TUNGGU TARA...");
-        beepPattern(2);
-        delay(600);
-        return false;
-      }
-
-      Serial.println("[TOUCH] Tombol NEXT ditekan! Wadah terdeteksi dan auto-tare selesai.");
+      Serial.println("[TOUCH] Tombol MULAI ditekan! Wadah terdeteksi.");
       beepOnce(80);
 
       // Feedback visual seketika
-      tft.fillRoundRect(8, 160, 224, 54, 8, WV_PRIMARY_BLUE);
+      tft.fillRoundRect(8, 182, 224, 56, 8, WV_PRIMARY_BLUE);
       tft.setTextColor(WV_TEXT_WHITE, WV_PRIMARY_BLUE);
       tft.setTextSize(2);
-      tft.setCursor(45, 176);
+      tft.setCursor(45, 194);
       tft.print("MEMULAI...");
 
       requiredDispenseDurationMs = calculateDispenseDurationMs(targetMilliLitres);
       dispensedMilliLitres = 0;
-      dispensedWeightGrams = 0.0f;
+      totalAccumulatedMl = 0;
+      isSwitchingBottle = false;
       activePumpDurationMs = 0;
       lastPumpIterationMillis = millis();
       dispenseStartTime = millis();
-      dryRunCheckStartTime = millis();
-      dryRunInitialWeight = currentLiveWeight;
       isDispensing = true;
       isDispensePaused = false;
 
@@ -429,12 +408,88 @@ bool handleTouchScreen() {
   // ----------------------------------------------------------------------------
   else if (currentScreen == SCREEN_DISPENSING) {
     if (isDispensePaused) {
-      // A. Tombol SELESAI (CUKUP) saat Jeda -> Y: 130-180, X: 6-234
-      if (touchY >= 130 && touchY <= 180 && touchX >= 6 && touchX <= 234) {
-        Serial.println("[TOUCH] SELESAI (CUKUP) ditekan saat jeda pengisian.");
+      if (isSwitchingBottle) {
+        // --- SENTUHAN SAAT MODE GANTI BOTOL BARU ---
+
+        // A. Tombol 1: MULAI ISI BOTOL > (Y: 160..220, X: 6..234)
+        if (touchY >= 160 && touchY <= 220 && touchX >= 6 && touchX <= 234) {
+          if (!isTumblerPresent) {
+            Serial.println("[SAFETY] Tombol MULAI ditekan tapi botol baru belum terdeteksi!");
+            beepPattern(2);
+            return false;
+          }
+
+          Serial.printf("[TOUCH] Botol baru dikonfirmasi! Melanjutkan sisa air dari %lu mL (Target: %lu mL)\n",
+                        totalAccumulatedMl, targetMilliLitres);
+          beepOnce(80);
+
+          isSwitchingBottle = false;
+          isDispensePaused = false;
+          lastPumpIterationMillis = millis();
+          dispenseStartTime = millis();
+
+          startPump();
+          showDispensingScreen(targetMilliLitres);
+          return true;
+        }
+
+        // B. Tombol 2: SELESAI (SUDAH CUKUP) (Y: 224..270, X: 6..234)
+        if (touchY >= 224 && touchY <= 270 && touchX >= 6 && touchX <= 234) {
+          Serial.println("[TOUCH] SELESAI (SUDAH CUKUP) ditekan pada mode ganti botol.");
+          beepPattern(3); // 3 Bip selesai pengisian
+          isDispensing = false;
+          isDispensePaused = false;
+          isSwitchingBottle = false;
+          stopPump();
+          showCompleteScreen("COMPLETED", dispensedMilliLitres, "Pengisian Selesai (Diakhiri Pelanggan)");
+
+          UIToNetMessage uiMsg;
+          memset(&uiMsg, 0, sizeof(uiMsg));
+          uiMsg.type = UI_MSG_COMPLETE;
+          uiMsg.dispensedMl = dispensedMilliLitres;
+          strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
+          strncpy(uiMsg.statusStr, "COMPLETED", sizeof(uiMsg.statusStr) - 1);
+
+          if (qUIToNet != NULL) {
+            xQueueSend(qUIToNet, &uiMsg, 0);
+          }
+          return true;
+        }
+
+        // C. Tombol 3: KEMBALI KE JEDA (Y: 272..316, X: 6..234)
+        if (touchY >= 272 && touchY <= 316 && touchX >= 6 && touchX <= 234) {
+          Serial.println("[TOUCH] BATALKAN GANTI BOTOL ditekan. Kembali ke jeda...");
+          beepOnce(60);
+          isSwitchingBottle = false;
+          s_lastDispensePauseState = false; // Memaksa redraw layar pause normal
+          return true;
+        }
+
+        return false;
+      }
+
+      // --- SENTUHAN SAAT JEDA NORMAL (WADAH TERLEPAS) ---
+
+      // A. Tombol 1: + GANTI BOTOL LAIN (Y: 124..170, X: 6..234)
+      if (touchY >= 124 && touchY <= 170 && touchX >= 6 && touchX <= 234) {
+        Serial.println("[TOUCH] Tombol GANTI BOTOL LAIN ditekan!");
         beepOnce(80);
+
+        totalAccumulatedMl = dispensedMilliLitres; // Kunci volume yang sudah masuk
+        isSwitchingBottle = true;
+        pauseStartTime = millis(); // Reset timeout jeda untuk botol baru
+
+        showSwitchBottleScreen(totalAccumulatedMl, targetMilliLitres);
+        return true;
+      }
+
+      // B. Tombol 2: SELESAI (CUKUP) (Y: 172..216, X: 6..234)
+      if (touchY >= 172 && touchY <= 216 && touchX >= 6 && touchX <= 234) {
+        Serial.println("[TOUCH] SELESAI (CUKUP) ditekan saat jeda pengisian.");
+        beepPattern(3); // 3 Bip selesai pengisian
         isDispensing = false;
         isDispensePaused = false;
+        isSwitchingBottle = false;
         stopPump();
         showCompleteScreen("COMPLETED", dispensedMilliLitres, "Pengisian Diakhiri Pelanggan");
 
@@ -451,12 +506,13 @@ bool handleTouchScreen() {
         return true;
       }
 
-      // B. Tombol STOP / BATAL saat Jeda -> Y: 184-236, X: 6-234
-      if (touchY >= 184 && touchY <= 236 && touchX >= 6 && touchX <= 234) {
+      // C. Tombol 3: STOP / BATAL saat Jeda (Y: 218..264, X: 6..234)
+      if (touchY >= 218 && touchY <= 264 && touchX >= 6 && touchX <= 234) {
         Serial.println("[TOUCH] STOP/BATAL ditekan saat jeda pengisian!");
-        beepOnce(120);
+        beepAlertLong(500); // Alarm panjang Stop Darurat
         isDispensing = false;
         isDispensePaused = false;
+        isSwitchingBottle = false;
         stopPump();
         showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Pengisian Dibatalkan");
 
@@ -473,28 +529,167 @@ bool handleTouchScreen() {
         return true;
       }
     } else {
-      // Area sentuh STOP darurat normal (Y: 180-255, X: 4-236)
-      if (touchY >= 180 && touchY <= 255 && touchX >= 4 && touchX <= 236) {
-        Serial.println("[TOUCH] STOP DARURAT DITEKAN!");
-        beepOnce(120);
-        isDispensing = false;
-        isDispensePaused = false;
-        stopPump();
-        showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Tombol Stop Darurat Ditekan");
-
-        // Kirim event complete emergency stop ke Core 0
-        UIToNetMessage uiMsg;
-        memset(&uiMsg, 0, sizeof(uiMsg));
-        uiMsg.type = UI_MSG_COMPLETE;
-        uiMsg.dispensedMl = dispensedMilliLitres;
-        strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
-        strncpy(uiMsg.statusStr, "EMERGENCY_STOPPED", sizeof(uiMsg.statusStr) - 1);
-
-        if (qUIToNet != NULL) {
-          xQueueSend(qUIToNet, &uiMsg, 0);
+      // Area sentuh STOP darurat normal (Y: 180-236, X: 8-232) - Tahan 1.0 Detik dengan Progress Fill
+      if (touchY >= 180 && touchY <= 236 && touchX >= 8 && touchX <= 232) {
+        if (holdButtonStartTime == 0) {
+          holdButtonStartTime = millis();
+          s_lastHoldTick = millis();
         }
-        return true;
+        unsigned long heldMs = millis() - holdButtonStartTime;
+        int pct = (heldMs >= 1000) ? 100 : (int)((heldMs * 100) / 1000);
+        drawHoldProgressStopDispensing(pct);
+
+        // Feedback suara ketika tombol DITAHAN: Bunyi tick setiap 200ms
+        if (millis() - s_lastHoldTick >= 200 && heldMs < 1000) {
+          s_lastHoldTick = millis();
+          beepOnce(30); // Bunyi saat tombol ditahan
+        }
+
+        if (heldMs >= 1000) {
+          Serial.println("[TOUCH] STOP DARURAT DITAHAN 1 DETIK! Menghentikan pengisian...");
+          holdButtonStartTime = 0;
+          beepAlertLong(500); // Alarm panjang Stop Darurat
+          isDispensing = false;
+          isDispensePaused = false;
+          isSwitchingBottle = false;
+          stopPump();
+          showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Stop Darurat Ditekan");
+
+          // Kirim event complete emergency stop ke Core 0
+          UIToNetMessage uiMsg;
+          memset(&uiMsg, 0, sizeof(uiMsg));
+          uiMsg.type = UI_MSG_COMPLETE;
+          uiMsg.dispensedMl = dispensedMilliLitres;
+          strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
+          strncpy(uiMsg.statusStr, "EMERGENCY_STOPPED", sizeof(uiMsg.statusStr) - 1);
+
+          if (qUIToNet != NULL) {
+            xQueueSend(qUIToNet, &uiMsg, 0);
+          }
+          return true;
+        }
+        return false;
+      } else {
+        if (holdButtonStartTime != 0) {
+          holdButtonStartTime = 0;
+          resetStopDispensingButton();
+        }
       }
+    }
+  }
+
+  // ----------------------------------------------------------------------------
+  // KASUS 5: Di Layar Kegagalan Air Tidak Naik (SCREEN_FAILED)
+  // ----------------------------------------------------------------------------
+  else if (currentScreen == SCREEN_FAILED) {
+    // A. Tombol 1: COBA LAGI (Y: 200..256, X: 6..234)
+    if (touchY >= 200 && touchY <= 256 && touchX >= 6 && touchX <= 234) {
+      Serial.println("[TOUCH FAILED SCREEN] Pelanggan memilih COBA LAGI!");
+      beepOnce(80);
+
+      // Cek Batas Percobaan Coba Lagi agar tidak bisa di-looping tanpa henti
+      if (dispenserDryRunRetryCount >= MAX_DRY_RUN_RETRIES) {
+        Serial.println("[SAFETY] Batas coba lagi sudah habis! Harus tekan LAPOR ADMIN.");
+        tft.fillRoundRect(8, 206, 224, 48, 6, WV_WARNING_AMBER);
+        tft.setTextColor(WV_TEXT_WHITE, WV_WARNING_AMBER);
+        tft.setTextSize(2);
+        tft.setCursor(20, 218);
+        tft.print("BATAS COBA HABIS!");
+        beepPattern(2);
+        delay(800);
+        // Tampilkan kembali tombol coba habis
+        tft.fillRoundRect(8, 206, 224, 48, 6, WV_FOOTER_BG);
+        tft.drawRoundRect(8, 206, 224, 48, 6, WV_CARD_BORDER);
+        tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+        tft.setTextSize(2);
+        tft.setCursor(25, 214);
+        tft.print("[ COBA HABIS ]");
+        tft.setTextSize(1);
+        tft.setCursor(20, 236);
+        tft.print("Silakan tekan LAPOR ADMIN di bawah");
+        return false;
+      }
+
+      // Proteksi Keamanan: Pastikan wadah masih terpasang (Sensor Ultrasonik)
+      bool isBottleReady = isTumblerPresent;
+      if (!isBottleReady) {
+        Serial.printf("[SAFETY] Ingin coba lagi tapi wadah belum terpasang!\n");
+        tft.fillRoundRect(8, 206, 224, 48, 6, WV_WARNING_AMBER);
+        tft.setTextColor(WV_TEXT_WHITE, WV_WARNING_AMBER);
+        tft.setTextSize(2);
+        tft.setCursor(28, 218);
+        tft.print("PASANG WADAH!");
+        beepPattern(2);
+        delay(800);
+        // Pulihkan tombol Coba Lagi
+        int retryLeft = max(0, MAX_DRY_RUN_RETRIES - dispenserDryRunRetryCount);
+        tft.fillRoundRect(8, 206, 224, 48, 6, WV_PRIMARY_BLUE);
+        tft.setTextColor(WV_TEXT_WHITE, WV_PRIMARY_BLUE);
+        tft.setTextSize(2);
+        tft.setCursor(25, 214);
+        tft.printf("[ > COBA LAGI (%d) ]", retryLeft);
+        tft.setTextSize(1);
+        tft.setCursor(20, 236);
+        tft.print("Lanjutkan sisa air tanpa bayar lagi");
+        return false;
+      }
+
+      // Tambahkan hitungan percobaan retry
+      dispenserDryRunRetryCount++;
+      Serial.printf("[RETRY] Melakukan percobaan coba lagi ke-%d dari maks %d\n", dispenserDryRunRetryCount, MAX_DRY_RUN_RETRIES);
+
+      // Beri feedback tombol ditekan
+      tft.fillRoundRect(8, 206, 224, 48, 6, WV_SUCCESS_GREEN);
+      tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
+      tft.setTextSize(2);
+      tft.setCursor(25, 218);
+      tft.print("MEMULAI LAGI...");
+
+      // Hitung sisa durasi / volume yang belum terisi
+      unsigned long remainingMl = (targetMilliLitres > dispensedMilliLitres) ? (targetMilliLitres - dispensedMilliLitres) : targetMilliLitres;
+      requiredDispenseDurationMs = calculateDispenseDurationMs(remainingMl);
+
+      lastPumpIterationMillis = millis();
+      dispenseStartTime = millis();
+      isDispensePaused = false;
+      isDispensing = true;
+
+      startPump();
+      showDispensingScreen(targetMilliLitres);
+      return true;
+    }
+
+    // B. Tombol 2: BATAL & LAPOR ADMIN (Y: 258..316, X: 6..234)
+    if (touchY >= 258 && touchY <= 316 && touchX >= 6 && touchX <= 234) {
+      Serial.println("[TOUCH FAILED SCREEN] Pelanggan memilih BATAL & LAPOR ADMIN!");
+      beepPattern(2);
+
+      // Feedback visual tombol
+      tft.fillRoundRect(8, 260, 224, 48, 6, WV_TEXT_BLACK);
+      tft.setTextColor(WV_TEXT_WHITE, WV_TEXT_BLACK);
+      tft.setTextSize(2);
+      tft.setCursor(20, 272);
+      tft.print("MELAPORKAN...");
+
+      isDispensing = false;
+      isDispensePaused = false;
+      stopPump();
+
+      // Kirim event complete dengan status FAILED_AIR_HABIS ke Core 0
+      UIToNetMessage uiMsg;
+      memset(&uiMsg, 0, sizeof(uiMsg));
+      uiMsg.type = UI_MSG_COMPLETE;
+      uiMsg.dispensedMl = dispensedMilliLitres;
+      strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
+      strncpy(uiMsg.statusStr, "FAILED", sizeof(uiMsg.statusStr) - 1);
+
+      if (qUIToNet != NULL) {
+        xQueueSend(qUIToNet, &uiMsg, 0);
+      }
+
+      long currentPrice = (activePackageIndex >= 0 && activePackageIndex < totalPackages) ? dispenserPackages[activePackageIndex].price : 6000L;
+      showReportedClaimScreen(currentTransactionId.c_str(), currentPrice);
+      return true;
     }
   }
 
@@ -523,10 +718,7 @@ void setup() {
   // Inisialisasi Model Debit Pompa Presisi (NVS Flash)
   initFlowCalculator();
 
-  // Inisialisasi Sensor Timbangan Load Cell 5kg + HX711
-  initScaleSensor();
-
-  // Inisialisasi Sensor Infrared Photoelectric E18-B03P1 & Buzzer
+  // Inisialisasi Sensor Proximity & Buzzer
   initProximitySensor();
   initBuzzer();
   beepOnce(100);
@@ -553,8 +745,17 @@ void setup() {
     0                 // Core ID 0
   );
 
-  // Tampilkan layar menu utama (Standby)
-  showStandbyScreen();
+  // Tampilkan layar loading UI/UX untuk mengambil menu pertama kali
+  showLoadingMenuScreen("Menghubungkan ke Server...");
+  loadingMenuStartTime = millis();
+
+  // Kirim permintaan get_packages ke Core 0
+  UIToNetMessage getPkgMsg;
+  memset(&getPkgMsg, 0, sizeof(getPkgMsg));
+  getPkgMsg.type = UI_MSG_GET_PACKAGES;
+  if (qUIToNet != NULL) {
+    xQueueSend(qUIToNet, &getPkgMsg, 0);
+  }
 }
 
 // ==============================================================================
@@ -666,100 +867,9 @@ void handleSerialCommands() {
     Serial.printf("   - Untuk 1.500 mL : butuh waktu sekitar %.1f detik\n", 1500.0f / pumpFlowRateMlPerSec);
     Serial.println("==================================================");
   }
-  // 11. Perintah TARE (Nolkan Timbangan Load Cell 5kg)
-  else if (cmd.equalsIgnoreCase("TARE") || cmd.equalsIgnoreCase("NOL")) {
-    tareScale();
-  }
-  // 12. Perintah WEIGHT? / SCALE? (Cek Berat Live Timbangan)
-  else if (cmd.equalsIgnoreCase("WEIGHT?") || cmd.equalsIgnoreCase("SCALE?") || cmd.equalsIgnoreCase("BERAT?")) {
-    Serial.println("==================================================");
-    Serial.println(">> STATUS SENSOR TIMBANGAN LOAD CELL 5KG + HX711:");
-    Serial.printf("   - Status Sensor       : %s\n", isScaleReady ? "TERHUBUNG (OK)" : "TIDAK MERESPON / TERPUTUS");
-    Serial.printf("   - Berat Netto Saat Ini: %.1f gram\n", currentLiveWeight);
-    Serial.printf("   - Tara Wadah          : %.1f gram\n", containerTareWeight);
-    Serial.printf("   - Berat Bruto (Total) : %.1f gram\n", currentLiveWeight + containerTareWeight);
-    Serial.printf("   - Raw ADC Saat Ini    : %ld\n", lastRawAdcReading);
-    Serial.printf("   - Faktor Kalibrasi    : %.2f\n", calibrationFactor);
-    Serial.printf("   - Batas Maksimum Beban: %.0f gram\n", maxWeightLimit);
-    Serial.println("==================================================");
-  }
-  // 13. Perintah CAL:<berat> (Kalibrasi Beban Acuan, contoh CAL:200 atau CAL:500)
-  else if (cmd.startsWith("CAL:") || cmd.startsWith("cal:")) {
-    String valStr = cmd.substring(4);
-    valStr.trim();
-    float knownW = valStr.toFloat();
-    if (knownW > 0.0f) {
-      calibrateScale(knownW);
-    } else {
-      Serial.println(">> [ERROR] Masukkan berat acuan valid dalam gram (Contoh: CAL:200)");
-    }
-  }
-  // 14. Perintah FACTOR:<faktor> (Set Faktor Kalibrasi Manual)
-  else if (cmd.startsWith("FACTOR:") || cmd.startsWith("factor:")) {
-    String valStr = cmd.substring(7);
-    valStr.trim();
-    float newF = valStr.toFloat();
-    if (newF != 0.0f) {
-      saveCalibrationFactor(newF);
-    } else {
-      Serial.println(">> [ERROR] Faktor kalibrasi tidak boleh 0!");
-    }
-  }
-  // 15. Perintah MAX:<gram> (Set Batas Beban Platform)
-  else if (cmd.startsWith("MAX:") || cmd.startsWith("max:")) {
-    String valStr = cmd.substring(4);
-    valStr.trim();
-    float newMax = valStr.toFloat();
-    if (newMax >= 100.0f) {
-      saveMaxWeight(newMax);
-    } else {
-      Serial.println(">> [ERROR] Batas beban minimal 100 gram (Contoh: MAX:2500)");
-    }
-  }
-  // 16. Perintah OFFSET:<gram> (Atur Early Cut-off Offset)
-  else if (cmd.startsWith("OFFSET:") || cmd.startsWith("offset:")) {
-    String valStr = cmd.substring(7);
-    valStr.trim();
-    float newOff = valStr.toFloat();
-    if (newOff >= 0.0f && newOff <= 50.0f) {
-      saveDispenseOffset(newOff);
-    } else {
-      Serial.println(">> [ERROR] Nilai offset antara 0.0 s/d 50.0 gram (Contoh: OFFSET:15.0)");
-    }
-  }
-  // 17. Perintah OFFSET? (Cek Parameter Cut-off & Target Efektif)
-  else if (cmd.equalsIgnoreCase("OFFSET?") || cmd.equalsIgnoreCase("BIAS?")) {
-    Serial.println("==================================================");
-    Serial.println(">> STATUS EARLY CUT-OFF & SAFETY BIAS:");
-    Serial.printf("   - Early Cut-off Offset : %.1f gram\n", dispenseEarlyOffsetGrams);
-    Serial.printf("   - Safety Margin Bias   : %.1f gram\n", targetSafetyBiasGrams);
-    Serial.printf("   - Target Cup 200 mL    : %.1f gram (Efektif: 199g +- 1g)\n", 200.0f - targetSafetyBiasGrams);
-    Serial.printf("   - Trigger Cut-off Pompa: %.1f gram (Pompa mati di angka ini)\n", 200.0f - targetSafetyBiasGrams - dispenseEarlyOffsetGrams);
-    Serial.printf("   - Waktu Tunggu Settle  : 800 ms\n");
-    Serial.println("==================================================");
-  }
-  // 18. Perintah BIAS:<gram> (Atur Safety Bias, default 1.0g untuk 199g)
-  else if (cmd.startsWith("BIAS:") || cmd.startsWith("bias:")) {
-    String valStr = cmd.substring(5);
-    valStr.trim();
-    float newBias = valStr.toFloat();
-    if (newBias >= 0.0f && newBias <= 20.0f) {
-      saveSafetyBias(newBias);
-    } else {
-      Serial.println(">> [ERROR] Nilai bias antara 0.0 s/d 20.0 gram (Contoh: BIAS:1.0)");
-    }
-  }
-  // 19. Bantuan Command
+  // 11. Bantuan Command
   else if (cmd.equalsIgnoreCase("HELP") || cmd.equalsIgnoreCase("?")) {
     Serial.println(">> PERINTAH SERIAL TERSEDIA:");
-    Serial.println("   - TARE        : Nolkan timbangan (Tara) saat wadah diletakkan");
-    Serial.println("   - WEIGHT?     : Cek status timbangan HX711 & pembacaan berat live");
-    Serial.println("   - CAL:<gram>  : Kalibrasi timbangan dengan beban acuan (Contoh: CAL:200)");
-    Serial.println("   - FACTOR:<f>  : Atur faktor kalibrasi manual (Contoh: FACTOR:-420.0)");
-    Serial.println("   - OFFSET:<g>  : Atur Early Cut-off Offset inersia selang (Contoh: OFFSET:15.0)");
-    Serial.println("   - BIAS:<g>    : Atur Safety Bias anti-tumpah (Contoh: BIAS:1.0 -> 199g)");
-    Serial.println("   - OFFSET?     : Cek parameter cut-off offset & target efektif");
-    Serial.println("   - MAX:<gram>  : Atur batas beban maksimal platform (Contoh: MAX:2500)");
     Serial.println("   - FLOW:<rate> : Atur debit pompa dinamis (Contoh: FLOW:25.0 atau FLOW:30.0)");
     Serial.println("   - FLOW?       : Cek debit saat ini & tabel simulasi waktu pengisian");
     Serial.println("   - WIFI:RESET  : Hapus Wi-Fi tersimpan & buka hotspot WaterVend-Setup");
@@ -777,30 +887,31 @@ void handleSerialCommands() {
 // LOOP UTAMA: DEDICATED UI & CONTROL TASK (BERJALAN DI CORE 1 APP_CPU)
 // ==============================================================================
 void loop() {
-  // 1. Baca Sensor Timbangan Load Cell 5kg + HX711 (Non-blocking)
-  updateScaleReading();
-
-  // 2. Baca Perintah Serial Monitor (Offline Dynamic Distance Config & Kalibrasi)
+  // 1. Baca Perintah Serial Monitor (Offline Dynamic Distance Config & Kalibrasi)
   handleSerialCommands();
 
-  // 3. Baca Sensor Ultrasonik HC-SR04 HANYA pada 2 kondisi: SCREEN_PLACE_TUMBLER atau SCREEN_DISPENSING
-  if (currentScreen == SCREEN_PLACE_TUMBLER || currentScreen == SCREEN_DISPENSING) {
+  // 2. Baca Sensor Ultrasonik HC-SR04 pada SCREEN_PLACE_TUMBLER, SCREEN_DISPENSING, SCREEN_COMPLETE, atau SCREEN_FAILED
+  if (currentScreen == SCREEN_PLACE_TUMBLER || currentScreen == SCREEN_DISPENSING || 
+      currentScreen == SCREEN_COMPLETE || currentScreen == SCREEN_FAILED) {
     isTumblerPresent = checkTumblerPresent();
   } else {
-    isTumblerPresent = false; // Sensor hibernasi pada Standby, QRIS, Complete, Boot
+    isTumblerPresent = false; // Sensor hibernasi pada Standby, QRIS, Boot
   }
-  updateSensorBuzzerAlarm(isTumblerPresent);
+  // 3. Update State Machine Buzzer (Selalu dipanggil di setiap loop di Core 1 agar antrean bip mati tepat waktu)
+  updateBuzzer();
 
-  // Evaluasi Auto-Tare Otomatis & Perbarui UI Letakkan Tumbler
+  // Perbarui UI Wadah
   if (currentScreen == SCREEN_PLACE_TUMBLER) {
-    checkAutoTareStability();
     updatePlaceTumblerUI(isTumblerPresent, currentMeasuredDistanceCm);
   }
+  else if (currentScreen == SCREEN_DISPENSING && isSwitchingBottle) {
+    updateSwitchBottleUI(isTumblerPresent);
+  }
 
-  // 3. Proses Pesan Masuk dari Core 0 (Event Jaringan & MQTT)
+  // 4. Proses Pesan Masuk dari Core 0 (Event Jaringan & MQTT)
   handleIncomingNetworkMessages();
 
-  // 4. Baca Input Sentuhan Layar Touch Screen (High Priority, Zero-Lag)
+  // 5. Baca Input Sentuhan Layar Touch Screen (High Priority, Zero-Lag)
   if (handleTouchScreen()) {
     // Layar baru saja berpindah melalui interaksi sentuhan.
     // Segera akhiri iterasi loop ini agar layar baru dievaluasi dengan timer segar di iterasi berikutnya!
@@ -810,11 +921,50 @@ void loop() {
   // Refresh waktu saat ini setelah interaksi sentuhan
   unsigned long currentMillis = millis();
 
-  // 5. Status 1: Proses Pengisian Air Sedang Berlangsung (Dispensing)
+  // 6. Status 1: Proses Pengisian Air Sedang Berlangsung (Dispensing)
   if (isDispensing) {
-    // PROTEKSI SENSOR WADAH: DUAL SENSOR SMART PAUSE & RESUME (Ultrasonik + Timbangan)
-    // Wadah dianggap terlepas jika sensor ultrasonik kosong ATAU beban timbangan turun tajam ke negatif (< -15g)
-    bool isTumblerRemoved = !isWaitingForSettle && (!isTumblerPresent || currentLiveWeight < -15.0f);
+    // KASUS A: SEDANG DALAM PROSES GANTI BOTOL BARU
+    if (isSwitchingBottle) {
+      stopPump();
+
+      // Peringatan Audio 15 detik terakhir sebelum jeda ganti botol habis (75..90 detik): Bip tiap 3 dtk
+      unsigned long elapsedSwitch = currentMillis - pauseStartTime;
+      if (elapsedSwitch >= 75000 && elapsedSwitch < 90000) {
+        static unsigned long s_lastSwitchWarnTime = 0;
+        if (currentMillis - s_lastSwitchWarnTime >= 3000) {
+          s_lastSwitchWarnTime = currentMillis;
+          beepOnce(70);
+        }
+      }
+
+      // Evaluasi Batas Waktu Ganti Botol (Timeout 90 Detik)
+      if (currentMillis - pauseStartTime >= 90000) {
+        Serial.println("[TIMEOUT GANTI BOTOL] Batas waktu 90 detik habis. Menyelesaikan otomatis...");
+        isDispensing = false;
+        isDispensePaused = false;
+        isSwitchingBottle = false;
+        stopPump();
+        showCompleteScreen("COMPLETED", dispensedMilliLitres, "Waktu Jeda Habis (Auto Selesai)");
+
+        UIToNetMessage uiMsg;
+        memset(&uiMsg, 0, sizeof(uiMsg));
+        uiMsg.type = UI_MSG_COMPLETE;
+        uiMsg.dispensedMl = dispensedMilliLitres;
+        strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
+        strncpy(uiMsg.statusStr, "COMPLETED", sizeof(uiMsg.statusStr) - 1);
+
+        if (qUIToNet != NULL) {
+          xQueueSend(qUIToNet, &uiMsg, 0);
+        }
+        return;
+      }
+
+      lastPumpIterationMillis = currentMillis;
+      return; // Tunggu pelanggan mengonfirmasi botol baru
+    }
+
+    // PROTEKSI SENSOR WADAH: SMART PAUSE & RESUME (Sensor Ultrasonik)
+    bool isTumblerRemoved = !isTumblerPresent;
 
     if (isTumblerRemoved) {
       // WADAH TERLEPAS / DITARIK!
@@ -823,8 +973,18 @@ void loop() {
         stopPump();
         pauseStartTime = currentMillis;
         beepPattern(2); // Peringatan 2 bip wadah terlepas
-        Serial.printf("[SAFETY PAUSE] Wadah terlepas saat dispensing! Pompa DIMATIKAN sementara. Terisi: %lu/%lu mL (%.1f g)\n",
-                      dispensedMilliLitres, targetMilliLitres, dispensedWeightGrams);
+        Serial.printf("[SAFETY PAUSE] Wadah terlepas saat dispensing! Pompa DIMATIKAN sementara. Terisi: %lu/%lu mL\n",
+                      dispensedMilliLitres, targetMilliLitres);
+      }
+
+      // Peringatan Audio 15 detik terakhir sebelum timeout jeda habis (45..60 detik): Bip tiap 3 dtk
+      unsigned long elapsedPause = currentMillis - pauseStartTime;
+      if (elapsedPause >= 45000 && elapsedPause < 60000) {
+        static unsigned long s_lastPauseWarnTime = 0;
+        if (currentMillis - s_lastPauseWarnTime >= 3000) {
+          s_lastPauseWarnTime = currentMillis;
+          beepOnce(70);
+        }
       }
 
       // Evaluasi Batas Waktu Jeda (Abandoned Pause Timeout 60 Detik)
@@ -832,7 +992,6 @@ void loop() {
         Serial.println("[TIMEOUT PAUSE] Wadah tidak ditaruh kembali selama 60 detik. Menyelesaikan otomatis...");
         isDispensing = false;
         isDispensePaused = false;
-        isWaitingForSettle = false;
         stopPump();
         showCompleteScreen("COMPLETED", dispensedMilliLitres, "Waktu Jeda Habis (Auto Selesai)");
 
@@ -855,14 +1014,10 @@ void loop() {
       if (isDispensePaused) {
         isDispensePaused = false;
         lastPumpIterationMillis = currentMillis;
-        dryRunCheckStartTime = currentMillis;
-        dryRunInitialWeight = dispensedWeightGrams;
-        if (!isWaitingForSettle) {
-          startPump();
-          beepOnce(80); // Bip konfirmasi resume
-          Serial.printf("[SAFETY RESUME] Wadah terpasang kembali! Pompa DINYALAKAN kembali. Melanjutkan dari %lu mL (%.1f g)...\n",
-                        dispensedMilliLitres, dispensedWeightGrams);
-        }
+        startPump();
+        beepOnce(80); // Bip konfirmasi resume
+        Serial.printf("[SAFETY RESUME] Wadah terpasang kembali! Pompa DINYALAKAN kembali. Melanjutkan dari %lu mL...\n",
+                      dispensedMilliLitres);
       }
 
       // Akumulasikan waktu aktif pompa berputar
@@ -870,58 +1025,9 @@ void loop() {
       activePumpDurationMs += deltaMs;
       lastPumpIterationMillis = currentMillis;
 
-      // Hitung volume air keluar secara real-time BERDASARKAN BERAT TIMBANGAN LOAD CELL (1 gram ~ 1 mL)
-      dispensedWeightGrams = max(0.0f, currentLiveWeight);
-      dispensedMilliLitres = (unsigned long)round(dispensedWeightGrams);
-
-      // PROTEKSI 1: DRY-RUN PROTECTION (Sumber Air Habis)
-      // Jika pompa sudah berjalan > 4 detik tetapi pertambahan berat < 5.0 gram
-      if (currentMillis - dryRunCheckStartTime >= 4000) {
-        if (dispensedWeightGrams - dryRunInitialWeight < 5.0f) {
-          Serial.println("[DRY-RUN SAFETY] Pompa berputar > 4 detik tapi berat air tidak naik (< 5g)! Air sumber habis.");
-          isDispensing = false;
-          isDispensePaused = false;
-          stopPump();
-          beepPattern(3);
-          showCompleteScreen("AIR_HABIS", dispensedMilliLitres, "Air Sumber Habis!");
-
-          UIToNetMessage uiMsg;
-          memset(&uiMsg, 0, sizeof(uiMsg));
-          uiMsg.type = UI_MSG_COMPLETE;
-          uiMsg.dispensedMl = dispensedMilliLitres;
-          strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
-          strncpy(uiMsg.statusStr, "AIR_HABIS", sizeof(uiMsg.statusStr) - 1);
-
-          if (qUIToNet != NULL) {
-            xQueueSend(qUIToNet, &uiMsg, 0);
-          }
-          return;
-        }
-      }
-
-      // PROTEKSI 2: OVERFILL / OVERWEIGHT PROTECTION (Mendekati Batas Beban Sensor 5kg)
-      float totalGross = currentLiveWeight + containerTareWeight;
-      if (totalGross >= maxWeightLimit) {
-        Serial.printf("[OVERFILL SAFETY] Beban mendekati batas aman (%.1f g >= %.0f g)! Pompa dihentikan.\n",
-                      totalGross, maxWeightLimit);
-        isDispensing = false;
-        isDispensePaused = false;
-        stopPump();
-        beepPattern(3);
-        showCompleteScreen("OVERWEIGHT", dispensedMilliLitres, "Batas Maksimal Beban!");
-
-        UIToNetMessage uiMsg;
-        memset(&uiMsg, 0, sizeof(uiMsg));
-        uiMsg.type = UI_MSG_COMPLETE;
-        uiMsg.dispensedMl = dispensedMilliLitres;
-        strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
-        strncpy(uiMsg.statusStr, "OVERWEIGHT", sizeof(uiMsg.statusStr) - 1);
-
-        if (qUIToNet != NULL) {
-          xQueueSend(qUIToNet, &uiMsg, 0);
-        }
-        return;
-      }
+      // Hitung estimasi volume air terisi (mL) real-time berdasarkan debit pompa terkalibrasi & waktu aktif
+      unsigned long remainingQuota = (targetMilliLitres > totalAccumulatedMl) ? (targetMilliLitres - totalAccumulatedMl) : 0;
+      dispensedMilliLitres = totalAccumulatedMl + calculateLiveDispensedMl(activePumpDurationMs, remainingQuota);
     }
 
     // Perbarui Animasi Aliran Air & Angka Live di Layar LCD
@@ -940,51 +1046,22 @@ void loop() {
       uiMsg.flowRateLpm = flowRateLpm;
       uiMsg.flowRateMlPerSec = isDispensePaused ? 0.0f : pumpFlowRateMlPerSec;
       strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
-      // Data Timbangan Load Cell 5kg
-      uiMsg.currentWeight = currentLiveWeight;
-      uiMsg.dispensedWeightGrams = dispensedWeightGrams;
-      uiMsg.containerTareWeight = containerTareWeight;
-      uiMsg.grossWeight = currentLiveWeight + containerTareWeight;
-      uiMsg.calFactor = calibrationFactor;
-      uiMsg.isScaleReady = isScaleReady;
 
       if (qUIToNet != NULL) {
         xQueueSend(qUIToNet, &uiMsg, 0);
       }
     }
 
-    // --------------------------------------------------------------------------
-    // ALGORITMA EARLY CUT-OFF OFFSET & ADAPTIVE SELF-TUNING (Target 199g +- 1g)
-    // --------------------------------------------------------------------------
-    float effectiveTarget = max(0.0f, (float)targetMilliLitres - targetSafetyBiasGrams);
-    float cutoffThreshold = max(0.0f, effectiveTarget - dispenseEarlyOffsetGrams);
-
-    // Tahap 1: Pemicu Cut-off Dini (Matikan Pompa sebelum Target Meluap)
-    if (!isWaitingForSettle && dispensedWeightGrams >= cutoffThreshold) {
+    // Pemicu Pengisian Selesai: Durasi pompa tercapai atau kuota volume terpenuhi
+    if (activePumpDurationMs >= requiredDispenseDurationMs || dispensedMilliLitres >= targetMilliLitres) {
       stopPump();
-      pumpStopTime = currentMillis;
-      isWaitingForSettle = true;
-      beepOnce(60);
-      Serial.printf("[EARLY CUTOFF] Dipotong dini di %.1f g (Target Efektif: %.1f g, Offset: %.1f g). Menunggu stabilisasi tetesan 800ms...\n",
-                    dispensedWeightGrams, effectiveTarget, dispenseEarlyOffsetGrams);
-    }
-
-    // Tahap 2: Periode Tunggu Stabilisasi Tetesan (800 ms) Pasca-Pompa Mati
-    if (isWaitingForSettle && (currentMillis - pumpStopTime >= 800)) {
-      isWaitingForSettle = false;
       isDispensing = false;
       isDispensePaused = false;
+      dispensedMilliLitres = targetMilliLitres;
 
-      // Ambil berat akhir riil yang sudah tenang
-      float finalWeight = max(0.0f, currentLiveWeight);
-      dispensedMilliLitres = (unsigned long)round(finalWeight);
-
-      // Jalankan algoritma auto-tune adaptif
-      updateAdaptiveOffset(finalWeight, (float)targetMilliLitres);
-
-      beepPattern(2);
-      Serial.printf("[DISPENSE FINAL SETTLED] Hasil Akhir Stabil: %.1f g (Target: %.1f g). Pengisian Selesai!\n",
-                    finalWeight, effectiveTarget);
+      beepPattern(3); // 3 Bip gembira: Pengisian air selesai 100%!
+      Serial.printf("[DISPENSE COMPLETE] Selesai: %lu mL dalam %lu ms (Target: %lu mL). Pompa Mati Presisi!\n",
+                    dispensedMilliLitres, activePumpDurationMs, targetMilliLitres);
 
       showCompleteScreen("COMPLETED", dispensedMilliLitres, "Pengisian Selesai Presisi");
 
@@ -1031,24 +1108,70 @@ void loop() {
     }
   }
 
-  // 5. Status 3: Layar Place Tumbler, Selesai, atau Siaga (Standby)
+  // 5. Status 3: Layar Place Tumbler, Selesai, Gagal, Loading, atau Siaga (Standby)
   else {
+    // Penanganan khusus SCREEN_LOADING (Animasi & Auto-Fallback jika offline)
+    if (currentScreen == SCREEN_LOADING) {
+      updateLoadingMenuAnimation();
+
+      // Jika dalam 5 detik belum dapat update paket dari broker, gunakan paket NVS/default agar tidak macet
+      if (loadingMenuStartTime > 0 && currentMillis - loadingMenuStartTime >= 5000) {
+        Serial.println("[LOADING MENU] Waktu tunggu 5 detik tercapai. Menampilkan menu lokal/NVS...");
+        updateLoadingMenuAnimation(100);
+        delay(300);
+        showStandbyScreen();
+      }
+      return; // Jangan jalankan reset standby selama loading berlangsung
+    }
+
+    // Penanganan Cerdas SCREEN_COMPLETE (Smart Reset: 5s jika botol diangkat, 10s jika tertinggal + pengingat 6s)
+    if (currentScreen == SCREEN_COMPLETE) {
+      bool isBottleLifted = !isTumblerPresent;
+      if (isBottleLifted && !completeBottleWasRemoved) {
+        completeBottleWasRemoved = true;
+        autoResetScreenTime = currentMillis + 5000; // Reset tepat 5 detik setelah botol diangkat! ("5 detik aja")
+        Serial.println("[SMART RESET] Botol telah diangkat. Auto reset dalam 5 detik.");
+      }
+
+      // Jika botol masih tertinggal di tatakan pada detik ke-6, ingatkan dengan 2 bip buzzer ("10")
+      if (!completeBottleWasRemoved && !completeScreenReminderBeeped && (currentMillis - completeScreenEnterTime >= 6000)) {
+        completeScreenReminderBeeped = true;
+        beepPattern(2);
+        Serial.println("[SMART REMINDER] Pengingat: Botol masih di tatakan selama 6 detik!");
+      }
+    }
+
     checkAutoResetScreen();
 
-    // Kirim Heartbeat Status READY ke Core 0 setiap 1000 ms
-    if (currentMillis - lastTelemetryPublishTime >= 1000) {
+    // Fail-safe Timeout 3 Menit untuk SCREEN_FAILED jika ditinggal pelanggan tanpa sentuhan
+    static unsigned long failedScreenStartTime = 0;
+    if (currentScreen == SCREEN_FAILED) {
+      if (failedScreenStartTime == 0) failedScreenStartTime = currentMillis;
+      if (currentMillis - failedScreenStartTime >= 180000) { // 3 menit (180 detik)
+        failedScreenStartTime = 0;
+        Serial.println("[TIMEOUT FAILED SCREEN] 3 menit tanpa sentuhan, auto-lapor gagal ke server.");
+        UIToNetMessage uiMsg;
+        memset(&uiMsg, 0, sizeof(uiMsg));
+        uiMsg.type = UI_MSG_COMPLETE;
+        uiMsg.dispensedMl = dispensedMilliLitres;
+        strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
+        strncpy(uiMsg.statusStr, "FAILED", sizeof(uiMsg.statusStr) - 1);
+        if (qUIToNet != NULL) {
+          xQueueSend(qUIToNet, &uiMsg, 0);
+        }
+        showStandbyScreen();
+      }
+    } else {
+      failedScreenStartTime = 0;
+    }
+
+    // Kirim Heartbeat Status READY ke Core 0 setiap 1000 ms (HANYA jika bukan di SCREEN_FAILED)
+    if (currentScreen != SCREEN_FAILED && currentMillis - lastTelemetryPublishTime >= 1000) {
       lastTelemetryPublishTime = currentMillis;
 
       UIToNetMessage uiMsg;
       memset(&uiMsg, 0, sizeof(uiMsg));
       uiMsg.type = UI_MSG_STATUS_READY;
-      // Data Timbangan Load Cell 5kg (Heartbeat Siaga)
-      uiMsg.currentWeight = currentLiveWeight;
-      uiMsg.dispensedWeightGrams = 0.0f;
-      uiMsg.containerTareWeight = containerTareWeight;
-      uiMsg.grossWeight = currentLiveWeight + containerTareWeight;
-      uiMsg.calFactor = calibrationFactor;
-      uiMsg.isScaleReady = isScaleReady;
 
       if (qUIToNet != NULL) {
         xQueueSend(qUIToNet, &uiMsg, 0);

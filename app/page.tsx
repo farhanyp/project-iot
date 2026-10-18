@@ -38,26 +38,14 @@ export default function Home() {
     telemetry,
     events,
     sendCommand,
-    sendTare,
     sendReset,
-    sendCalibrate,
-    sendSetCalFactor,
-    sendSetMaxWeight,
-    sendSetOffset,
-    sendSetBias,
   } = useIoTSocket();
 
   // Daftar paket dinamis dari database (fallback ke DEFAULT_PACKAGES)
   const [packages, setPackages] = useState<PackageItem[]>(DEFAULT_PACKAGES);
   const [selectedVolume, setSelectedVolume] = useState<number>(600);
   const [customVolume, setCustomVolume] = useState<string>("");
-  const [knownWeight, setKnownWeight] = useState<string>("200");
-  const [calFactorInput, setCalFactorInput] = useState<string>("-420.0");
-  const [maxWeightLimitInput, setMaxWeightLimitInput] = useState<string>("2500");
-  const [offsetInput, setOffsetInput] = useState<string>("15.0");
-  const [biasInput, setBiasInput] = useState<string>("1.0");
   const [feedback, setFeedback] = useState<string | null>(null);
-  const [dismissAlert, setDismissAlert] = useState<boolean>(false);
 
   // State Pembayaran Midtrans QRIS
   const [isPaying, setIsPaying] = useState(false);
@@ -78,36 +66,10 @@ export default function Home() {
       });
   }, []);
 
-  // Sync telemetri ESP32 saat render
-  const [prevCal, setPrevCal] = useState(telemetry.calFactor);
-  if (telemetry.calFactor !== undefined && telemetry.calFactor !== prevCal) {
-    setPrevCal(telemetry.calFactor);
-    setCalFactorInput(String(telemetry.calFactor));
-  }
-
-  const [prevLimit, setPrevLimit] = useState(telemetry.maxWeightLimit);
-  if (telemetry.maxWeightLimit !== undefined && telemetry.maxWeightLimit !== prevLimit) {
-    setPrevLimit(telemetry.maxWeightLimit);
-    setMaxWeightLimitInput(String(telemetry.maxWeightLimit));
-  }
-
-  const [prevOffset, setPrevOffset] = useState(telemetry.cutoffOffset);
-  if (telemetry.cutoffOffset !== undefined && telemetry.cutoffOffset !== prevOffset) {
-    setPrevOffset(telemetry.cutoffOffset);
-    setOffsetInput(String(telemetry.cutoffOffset));
-  }
-
-  const [prevBias, setPrevBias] = useState(telemetry.safetyBias);
-  if (telemetry.safetyBias !== undefined && telemetry.safetyBias !== prevBias) {
-    setPrevBias(telemetry.safetyBias);
-    setBiasInput(String(telemetry.safetyBias));
-  }
-
   const [prevStatus, setPrevStatus] = useState(deviceStatus);
   if (deviceStatus !== prevStatus) {
     setPrevStatus(deviceStatus);
     if (deviceStatus === "DISPENSING") {
-      setDismissAlert(false);
       // Jika pompa mulai mengalir, tutup modal pembayaran jika masih terbuka
       if (paymentOrder) setPaymentOrder(null);
     }
@@ -119,16 +81,8 @@ export default function Home() {
   const currentPrice = `Rp ${currentPriceAmount.toLocaleString("id-ID")}`;
 
   const target = telemetry.targetMl > 0 ? telemetry.targetMl : currentVolume;
-  const dispensed = telemetry.weightGrams ?? telemetry.dispensedMl ?? 0;
+  const dispensed = telemetry.dispensedMl ?? 0;
   const fillPct = Math.min(100, Math.round((dispensed / (target || 1)) * 100));
-
-  const maxLimit = parseFloat(maxWeightLimitInput) || 2500;
-  const gross = telemetry.grossWeight ?? (
-    deviceStatus === "DISPENSING"
-      ? (telemetry.containerWeight || 0) + (telemetry.weightGrams || 0)
-      : telemetry.currentWeight || 0
-  );
-  const grossPct = Math.min(100, Math.round((gross / maxLimit) * 100));
 
   const showFeedback = (msg: string) => {
     setFeedback(msg);
@@ -147,6 +101,9 @@ export default function Home() {
           const status = data.transaction?.status;
           if (status === "PAID" || status === "DISPENSING" || status === "COMPLETED") {
             showFeedback("Pembayaran lunas! Air mulai mengalir ke wadah...");
+            setPaymentOrder(null);
+          } else if (status === "FAILED") {
+            showFeedback("Pengisian GAGAL: Air tidak mengalir / habis. Silakan hubungi admin untuk klaim refund.");
             setPaymentOrder(null);
           }
         }
@@ -222,7 +179,7 @@ export default function Home() {
   };
 
   const handleStartManual = () => {
-    sendCommand("START", { volumeMl: currentVolume, maxWeight: maxLimit, deviceId: "DISPENSER-01" });
+    sendCommand("START", { volumeMl: currentVolume, deviceId: "DISPENSER-01" });
     showFeedback("Pengisian manual dimulai.");
   };
 
@@ -231,50 +188,9 @@ export default function Home() {
     showFeedback("Pompa dimatikan.");
   };
 
-  const handleTare = () => {
-    sendTare("DISPENSER-01");
-    showFeedback("Timbangan dinolkan (Tare).");
-  };
-
   const handleReset = () => {
     sendReset("DISPENSER-01");
-    setDismissAlert(true);
-    showFeedback("Sesi & timbangan di-reset.");
-  };
-
-  const handleCalibrate = () => {
-    const val = parseFloat(knownWeight);
-    if (!val || val <= 0) return showFeedback("Berat acuan tidak valid.");
-    sendCalibrate(val, "DISPENSER-01");
-    showFeedback(`Kalibrasi ${val}g dikirim.`);
-  };
-
-  const handleSaveFactor = () => {
-    const val = parseFloat(calFactorInput);
-    if (isNaN(val)) return showFeedback("Faktor kalibrasi tidak valid.");
-    sendSetCalFactor(val, "DISPENSER-01");
-    showFeedback(`Faktor ${val} disimpan.`);
-  };
-
-  const handleSaveMax = () => {
-    const val = parseFloat(maxWeightLimitInput);
-    if (!val || val <= 100) return showFeedback("Batas beban tidak valid.");
-    sendSetMaxWeight(val, "DISPENSER-01");
-    showFeedback(`Batas ${val}g disimpan.`);
-  };
-
-  const handleSaveOffset = () => {
-    const val = parseFloat(offsetInput);
-    if (isNaN(val) || val < 0 || val > 50) return showFeedback("Offset harus antara 0 - 50 gram.");
-    sendSetOffset(val, "DISPENSER-01");
-    showFeedback(`Early Cut-off Offset ${val}g disimpan ke Flash.`);
-  };
-
-  const handleSaveBias = () => {
-    const val = parseFloat(biasInput);
-    if (isNaN(val) || val < 0 || val > 20) return showFeedback("Safety bias harus antara 0 - 20 gram.");
-    sendSetBias(val, "DISPENSER-01");
-    showFeedback(`Safety bias ${val}g disimpan ke Flash (Target: ${200 - val}g).`);
+    showFeedback("Sesi pengisian di-reset.");
   };
 
   return (
@@ -341,19 +257,9 @@ export default function Home() {
           <div>
             <h3 className="font-bold text-base md:text-lg">Air Sedang Mengalir Otomatis...</h3>
             <p className="text-sm text-blue-800">
-              Sensor beban memantau volume secara presisi. Jangan mengangkat atau menggeser wadah hingga pengisian selesai.
+              Pompa mengalirkan air dengan model debit terkalibrasi presisi. Jangan mengangkat atau menggeser wadah hingga pengisian selesai.
             </p>
           </div>
-        </div>
-      )}
-
-      {/* Alert Overweight */}
-      {telemetry.status === "STOPPED_OVERWEIGHT" && !dismissAlert && (
-        <div className="p-4 bg-red-50 border border-red-300 text-red-900 rounded-lg text-base flex items-center justify-between gap-3">
-          <span>Beban platform (<strong>{gross.toFixed(1)}g</strong>) melebihi batas aman (<strong>{maxLimit}g</strong>). Pompa dimatikan otomatis.</span>
-          <button type="button" onClick={() => setDismissAlert(true)} className="px-3 py-1.5 bg-red-100 hover:bg-red-200 text-red-900 rounded font-semibold text-sm cursor-pointer">
-            Tutup
-          </button>
         </div>
       )}
 
@@ -414,7 +320,7 @@ export default function Home() {
               <div className="h-full bg-blue-600 transition-all duration-200" style={{ width: `${fillPct}%` }} />
             </div>
             <div className="text-xs md:text-sm text-slate-500 font-mono text-right">
-              Massa air: {dispensed.toFixed(1)} gram ({fillPct}%)
+              Volume terisi: {dispensed} mL ({fillPct}%)
             </div>
           </div>
 
@@ -452,68 +358,80 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Kolom Kanan: Timbangan Digital */}
+        {/* Kolom Kanan: Status Sensor & Debit Pompa */}
         <section className="bg-white border border-slate-200 rounded-xl p-5 md:p-6 space-y-5 shadow-sm">
           <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-            <h2 className="font-bold text-slate-900 text-lg">Timbangan (Load Cell 5kg)</h2>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={handleTare}
-                disabled={deviceStatus === "DISPENSING" || !isConnected}
-                className="px-3 py-1.5 border border-slate-300 hover:bg-slate-50 rounded-md text-sm font-medium text-slate-800 disabled:opacity-40 cursor-pointer"
-              >
-                Tare (0.0g)
-              </button>
-              <button
-                type="button"
-                onClick={handleReset}
-                disabled={deviceStatus === "DISPENSING" || !isConnected}
-                className="px-3 py-1.5 border border-slate-300 hover:bg-slate-50 rounded-md text-sm font-medium text-slate-800 disabled:opacity-40 cursor-pointer"
-              >
-                Reset Sesi
-              </button>
+            <h2 className="font-bold text-slate-900 text-lg">Sensor & Model Aliran Air</h2>
+            <button
+              type="button"
+              onClick={handleReset}
+              disabled={deviceStatus === "DISPENSING" || !isConnected}
+              className="px-3 py-1.5 border border-slate-300 hover:bg-slate-50 rounded-md text-sm font-medium text-slate-800 disabled:opacity-40 cursor-pointer"
+            >
+              Reset Sesi
+            </button>
+          </div>
+
+          {/* Card 1: Status Sensor Ultrasonik HC-SR04 */}
+          <div className={`p-4 rounded-xl border transition-all ${
+            telemetry.isTumblerPresent
+              ? "bg-emerald-50/70 border-emerald-300"
+              : "bg-amber-50/70 border-amber-300"
+          }`}>
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-xs uppercase font-bold tracking-wider text-slate-500">
+                  Sensor Wadah (HC-SR04 Ultrasonik)
+                </span>
+                <div className={`text-xl font-extrabold mt-0.5 ${
+                  telemetry.isTumblerPresent ? "text-emerald-800" : "text-amber-800"
+                }`}>
+                  {telemetry.isTumblerPresent ? "✓ Wadah Terdeteksi (Siap)" : "⚠️ Wadah Belum Diletakkan"}
+                </div>
+              </div>
+              <span className="text-2xl">{telemetry.isTumblerPresent ? "🏺" : "⏳"}</span>
+            </div>
+            <div className="mt-3 pt-2.5 border-t border-slate-200/60 flex items-center justify-between text-xs font-mono text-slate-700">
+              <span>Jarak Terukur: <strong>{telemetry.currentDistanceCm !== undefined ? `${telemetry.currentDistanceCm.toFixed(1)} cm` : "Membaca..."}</strong></span>
+              <span className="text-slate-500">Target Jarak: &le; {telemetry.targetDistanceCm ?? 12} cm</span>
             </div>
           </div>
 
-          {/* Display Berat Utama */}
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 flex items-baseline justify-between gap-4">
-            <div>
-              <span className="text-xs uppercase tracking-wider text-slate-500 font-semibold block">
-                {deviceStatus === "DISPENSING" ? "Netto Air Mengalir" : "Beban di Platform"}
-              </span>
-              <div className="text-4xl md:text-5xl font-extrabold font-mono text-slate-900 mt-1">
-                {deviceStatus === "DISPENSING" ? `+${dispensed.toFixed(1)}` : (telemetry.currentWeight ?? 0).toFixed(1)}
-                <span className="text-lg md:text-xl font-normal text-slate-500 ml-1">g</span>
+          {/* Card 2: Parameter Debit Pompa & Estimasi Waktu */}
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-xs uppercase font-bold tracking-wider text-slate-500">
+                  Model Debit Pompa BR314
+                </span>
+                <div className="text-2xl font-extrabold font-mono text-blue-700 mt-0.5">
+                  {(telemetry.flowRateMlPerSec ?? 25.0).toFixed(1)} <span className="text-sm font-normal text-slate-500">mL / detik</span>
+                </div>
+              </div>
+              <div className="text-right text-xs font-mono text-slate-600">
+                <div>Setara: <strong>{(((telemetry.flowRateMlPerSec ?? 25.0) * 60) / 1000).toFixed(2)} L/m</strong></div>
+                <div className="text-emerald-700 font-semibold mt-0.5">Timer Terkalibrasi</div>
               </div>
             </div>
-            <div className="text-right text-sm md:text-base text-slate-700 font-mono space-y-1">
-              <div>Tara Wadah: <strong>{telemetry.containerWeight ?? 0}g</strong></div>
-              <div>Total Bruto: <strong>{gross.toFixed(1)}g</strong></div>
-              <div className="text-slate-500 text-xs md:text-sm">Batas Maks: {maxLimit}g</div>
-            </div>
-          </div>
 
-          {/* Bar Beban Platform */}
-          <div className="space-y-2">
-            <div className="flex justify-between text-sm md:text-base text-slate-700 font-medium">
-              <span>Beban Platform: {gross.toFixed(1)} / {maxLimit}g</span>
-              <span className={`font-mono font-bold ${grossPct >= 90 ? "text-red-600" : ""}`}>{grossPct}%</span>
+            <div className="bg-white p-3 rounded-lg border border-slate-200 text-xs space-y-1.5 font-mono">
+              <div className="flex justify-between text-slate-600">
+                <span>Paket Terpilih:</span>
+                <strong className="text-slate-900">{currentVolume} mL</strong>
+              </div>
+              <div className="flex justify-between text-slate-600">
+                <span>Estimasi Durasi Pengisian:</span>
+                <strong className="text-blue-700">{((currentVolume / (telemetry.flowRateMlPerSec || 25.0))).toFixed(1)} detik</strong>
+              </div>
             </div>
-            <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden border border-slate-200">
-              <div className={`h-full transition-all duration-200 ${grossPct >= 90 ? "bg-red-500" : grossPct >= 70 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${grossPct}%` }} />
-            </div>
-          </div>
 
-          {/* Info Status Target Efektif & Early Cut-off */}
-          <div className="bg-blue-50/70 border border-blue-200 rounded-lg p-2.5 text-xs text-blue-900 flex flex-wrap items-center justify-between gap-2 font-mono">
-            <div>
-              Target Efektif: <strong>{telemetry.effectiveTarget !== undefined ? `${telemetry.effectiveTarget}g` : `${(selectedVolume || 200) - parseFloat(biasInput || "1.0")}g`}</strong>
-              <span className="text-blue-600 text-[11px] ml-1">(Bias -{biasInput}g)</span>
-            </div>
-            <div>
-              Trigger Cut-off: <strong>{((telemetry.effectiveTarget !== undefined ? telemetry.effectiveTarget : (selectedVolume || 200) - parseFloat(biasInput || "1.0")) - parseFloat(offsetInput || "15.0")).toFixed(1)}g</strong>
-              <span className="text-blue-600 text-[11px] ml-1">(Offset -{offsetInput}g)</span>
+            <div className="text-right">
+              <a
+                href="/admin"
+                className="text-xs text-blue-600 hover:text-blue-800 font-medium inline-flex items-center gap-1"
+              >
+                Ubah / Kalibrasi Debit di Halaman Admin &rarr;
+              </a>
             </div>
           </div>
 
@@ -673,54 +591,6 @@ export default function Home() {
           </div>
         </div>
       )}
-
-      {/* Konfigurasi & Kalibrasi */}
-      <details className="bg-white border border-slate-200 rounded-xl p-4 text-sm text-slate-700 shadow-sm">
-        <summary className="font-semibold cursor-pointer text-slate-900 text-base select-none">
-          Pengaturan Kalibrasi & Batas Beban Flash ESP32
-        </summary>
-        <div className="pt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 border-t border-slate-100 mt-3">
-          <div className="space-y-1.5">
-            <label htmlFor="known-weight" className="text-slate-700 font-medium block">1. Kalibrasi Beban (g):</label>
-            <div className="flex gap-2">
-              <input id="known-weight" type="number" value={knownWeight} onChange={(e) => setKnownWeight(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-1.5 font-mono text-base" />
-              <button type="button" onClick={handleCalibrate} className="px-3.5 py-1.5 bg-slate-800 text-white font-medium rounded-lg shrink-0 hover:bg-slate-700 cursor-pointer">Set</button>
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <label htmlFor="cal-factor" className="text-slate-700 font-medium block">2. Faktor Kalibrasi:</label>
-            <div className="flex gap-2">
-              <input id="cal-factor" type="number" step="0.1" value={calFactorInput} onChange={(e) => setCalFactorInput(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-1.5 font-mono text-base" />
-              <button type="button" onClick={handleSaveFactor} className="px-3.5 py-1.5 bg-slate-800 text-white font-medium rounded-lg shrink-0 hover:bg-slate-700 cursor-pointer">Simpan</button>
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <label htmlFor="max-weight" className="text-slate-700 font-medium block">3. Batas Beban Flash (g):</label>
-            <div className="flex gap-2">
-              <input id="max-weight" type="number" step="50" value={maxWeightLimitInput} onChange={(e) => setMaxWeightLimitInput(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-1.5 font-mono text-base" />
-              <button type="button" onClick={handleSaveMax} className="px-3.5 py-1.5 bg-slate-800 text-white font-medium rounded-lg shrink-0 hover:bg-slate-700 cursor-pointer">Simpan</button>
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <label htmlFor="offset-input" className="text-slate-700 font-medium block">4. Early Cut-off Offset (g):</label>
-            <div className="flex gap-2">
-              <input id="offset-input" type="number" step="0.5" value={offsetInput} onChange={(e) => setOffsetInput(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-1.5 font-mono text-base" />
-              <button type="button" onClick={handleSaveOffset} className="px-3.5 py-1.5 bg-blue-700 text-white font-medium rounded-lg shrink-0 hover:bg-blue-600 cursor-pointer">Simpan</button>
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <label htmlFor="bias-input" className="text-slate-700 font-medium block">5. Safety Margin Bias (g):</label>
-            <div className="flex gap-2">
-              <input id="bias-input" type="number" step="0.5" value={biasInput} onChange={(e) => setBiasInput(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-1.5 font-mono text-base" />
-              <button type="button" onClick={handleSaveBias} className="px-3.5 py-1.5 bg-blue-700 text-white font-medium rounded-lg shrink-0 hover:bg-blue-600 cursor-pointer">Simpan</button>
-            </div>
-          </div>
-        </div>
-      </details>
 
       {/* Log Telemetri */}
       <details className="bg-white border border-slate-200 rounded-xl p-4 text-sm text-slate-700 shadow-sm">

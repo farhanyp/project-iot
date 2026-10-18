@@ -8,7 +8,6 @@
 #include <XPT2046_Touchscreen.h> // Library Touch Screen XPT2046
 #include <SPI.h>
 #include <qrcode.h>
-#include <HX711.h>            // Library Load Cell HX711 oleh bogde
 
 // ==============================================================================
 // 1. DEFINISI PIN PERANGKAT KERAS (HARDWARE PINOUT)
@@ -38,10 +37,6 @@ const int PIN_TRIGGER_RESET_WIFI = 0;  // GPIO 0 (Tombol BOOT ESP32)
 const int PIN_ULTRASONIC_TRIG    = 25; // GPIO 25 (Output Trigger Pulsa HC-SR04)
 const int PIN_ULTRASONIC_ECHO    = 26; // GPIO 26 (Input Echo Pantulan HC-SR04)
 const int PIN_BUZZER             = 27; // GPIO 27 (Kaki Positif Buzzer)
-
-// Pin Sensor Timbangan Load Cell 5kg + Modul ADC HX711
-const int PIN_HX711_DT           = 16; // GPIO 16 (DT / Data)
-const int PIN_HX711_SCK          = 4;  // GPIO 4  (SCK / Clock)
 
 #define RELAY_ACTIVE_STATE LOW
 
@@ -88,13 +83,7 @@ enum NetToUIMsgType {
   NET_MSG_CMD_START,
   NET_MSG_CMD_STOP,
   NET_MSG_CMD_RESET,
-  NET_MSG_CMD_TARE,
-  NET_MSG_CMD_CALIBRATE,
-  NET_MSG_CMD_SET_CAL_FACTOR,
-  NET_MSG_CMD_SET_MAX_WEIGHT,
-  NET_MSG_CMD_RESET_WIFI,
-  NET_MSG_CMD_SET_OFFSET,
-  NET_MSG_CMD_SET_BIAS
+  NET_MSG_CMD_RESET_WIFI
 };
 
 struct NetToUIMessage {
@@ -104,7 +93,6 @@ struct NetToUIMessage {
   char nominal[16];
   char qrPayload[512];
   unsigned long timeoutSeconds;
-  float floatVal; // Digunakan untuk knownWeight, calFactor, maxWeight
 };
 
 // Pesan dari UI Task (Core 1) ke Network Task (Core 0)
@@ -114,7 +102,8 @@ enum UIToNetMsgType {
   UI_MSG_ORDER_CANCEL,
   UI_MSG_TELEMETRY,
   UI_MSG_COMPLETE,
-  UI_MSG_STATUS_READY
+  UI_MSG_STATUS_READY,
+  UI_MSG_GET_PACKAGES
 };
 
 struct UIToNetMessage {
@@ -129,13 +118,6 @@ struct UIToNetMessage {
   unsigned long targetMl;
   float flowRateLpm;
   float flowRateMlPerSec;
-  // Field Tambahan Sensor Berat Load Cell HX711
-  float currentWeight;
-  float dispensedWeightGrams;
-  float containerTareWeight;
-  float grossWeight;
-  float calFactor;
-  bool isScaleReady;
 };
 
 // Handle Antrean FreeRTOS
@@ -166,11 +148,13 @@ extern int totalPackages;
 // ==============================================================================
 enum ScreenState {
   SCREEN_BOOT_WIFI,      // 1. Tampilan WiFi & status koneksi simpel
-  SCREEN_STANDBY,        // 2. Daftar Menu Paket dinamis dari database
-  SCREEN_QRIS,           // 3. Tampilan QRIS & countdown 5 menit
-  SCREEN_PLACE_TUMBLER,  // 4. Instruksi letakkan tumbler + tombol NEXT
-  SCREEN_DISPENSING,     // 5. Animasi air mengalir & pompa aktif
-  SCREEN_COMPLETE        // 6. Ucapan terima kasih & kembali ke menu
+  SCREEN_LOADING,        // 2. Loading menu paket dari server/cloud
+  SCREEN_STANDBY,        // 3. Daftar Menu Paket dinamis dari database
+  SCREEN_QRIS,           // 4. Tampilan QRIS & countdown 5 menit
+  SCREEN_PLACE_TUMBLER,  // 5. Instruksi letakkan tumbler + tombol NEXT
+  SCREEN_DISPENSING,     // 6. Animasi air mengalir & pompa aktif
+  SCREEN_COMPLETE,       // 7. Ucapan terima kasih & kembali ke menu
+  SCREEN_FAILED          // 8. Layar kegagalan pengisian air (Air Habis / Dry-Run)
 };
 
 // ==============================================================================
@@ -233,27 +217,18 @@ extern volatile unsigned long buzzerBeepUntil;
 extern volatile int buzzerBeepCountRemaining;
 extern volatile unsigned long buzzerNextBeepTime;
 
-// Variabel Kontrol Sensor Berat Load Cell 5kg + HX711
-extern HX711 scale;
-extern bool isScaleReady;
-extern float calibrationFactor;
-extern float currentLiveWeight;
-extern float dispensedWeightGrams;
-extern float containerTareWeight;
-extern long lastRawAdcReading;
-extern float maxWeightLimit;
-
-// Variabel Auto-Tare & Kontrol Pengisian Berbasis Berat
-extern bool isAutoTareDone;
-extern unsigned long tareStabilityStartTime;
-extern float lastTareCandidateWeight;
+// Variabel Jeda Pengisian (Wadah Terlepas)
 extern unsigned long pauseStartTime;
-extern unsigned long dryRunCheckStartTime;
-extern float dryRunInitialWeight;
 
-// Variabel Early Cut-Off Offset & Adaptive Self-Tuning (Target 199g +- 1g)
-extern float dispenseEarlyOffsetGrams;
-extern float targetSafetyBiasGrams;
-extern unsigned long pumpStopTime;
-extern bool isWaitingForSettle;
+// Variabel Pengisian Multi-Botol (Ganti Botol di Tengah Jalan)
+extern unsigned long totalAccumulatedMl;
+extern bool isSwitchingBottle;
+
+// Variabel Safety Hold Button & Smart Complete Reset
+extern unsigned long holdButtonStartTime;
+extern bool completeBottleWasRemoved;
+extern bool completeScreenReminderBeeped;
+extern unsigned long completeScreenEnterTime;
+
+
 

@@ -42,7 +42,7 @@ const mqttClient = mqtt.connect(BROKER_URL, {
 mqttClient.on("connect", () => {
   console.log(`[MQTT] Connected successfully to Mosquitto Broker!`);
 
-  // Subscribe ke topik telemetri, status, perintah, permintaan order touch, dan pembatalan
+  // Subscribe ke topik telemetri, status, perintah, permintaan order touch, pembatalan, dan permintaan sinkronisasi paket
   const topics = [
     "water/dispenser/+/status",
     "water/dispenser/+/telemetry",
@@ -50,6 +50,7 @@ mqttClient.on("connect", () => {
     "water/dispenser/+/command",
     "water/dispenser/+/order_request",
     "water/dispenser/+/cancel",
+    "water/dispenser/+/get_packages",
   ];
 
   mqttClient.subscribe(topics, (err) => {
@@ -112,17 +113,6 @@ mqttClient.on("message", async (topic, message) => {
           console.warn("[MQTT BRIDGE] Gagal auto-push paket:", err);
         });
       }
-
-      if (payload.calFactor !== undefined || payload.isScaleReady !== undefined) {
-        cachedTelemetry = {
-          ...(cachedTelemetry || {}),
-          calFactor: payload.calFactor ?? cachedTelemetry?.calFactor,
-          isScaleReady: payload.isScaleReady !== undefined ? !!payload.isScaleReady : cachedTelemetry?.isScaleReady,
-          scaleStatus: payload.scaleStatus ?? cachedTelemetry?.scaleStatus,
-          scaleLog: payload.scaleLog ?? cachedTelemetry?.scaleLog,
-          scaleRaw: payload.scaleRaw ?? cachedTelemetry?.scaleRaw,
-        };
-      }
     } else if (eventType === "telemetry") {
       if (simulationTimer) {
         // Hardware ESP32 fisik aktif dan mengirim telemetri nyata, matikan simulasi virtual
@@ -143,11 +133,14 @@ mqttClient.on("message", async (topic, message) => {
         clearInterval(simulationTimer);
         simulationTimer = null;
       }
-      cachedDeviceStatus = "READY";
+      const rawCompleteStatus = (payload.status || "").toUpperCase();
+      const isFailedComplete = rawCompleteStatus.includes("FAIL") || 
+                               rawCompleteStatus.includes("HABIS") || 
+                               rawCompleteStatus === "EMERGENCY_STOPPED";
+      cachedDeviceStatus = isFailedComplete ? "OFFLINE" : "READY";
       if (cachedTelemetry) {
         cachedTelemetry.dispensedMl = payload.dispensedMl || cachedTelemetry.dispensedMl;
-        cachedTelemetry.weightGrams = payload.weightGrams || cachedTelemetry.weightGrams;
-        cachedTelemetry.status = "COMPLETED";
+        cachedTelemetry.status = isFailedComplete ? "FAILED" : "COMPLETED";
       }
     } else if (eventType === "command") {
       console.log(`[MQTT COMMAND for ${deviceCode}]:`, payload);
@@ -162,7 +155,6 @@ mqttClient.on("message", async (topic, message) => {
           status: "DISPENSING",
           targetMl,
           dispensedMl: 0,
-          weightGrams: 0,
           flowRate: 1.25,
         };
 
@@ -207,7 +199,6 @@ mqttClient.on("message", async (topic, message) => {
             status: "DISPENSING",
             targetMl,
             dispensedMl: currentMl,
-            weightGrams: currentMl,
             flowRate: 1.25,
           };
 
@@ -220,7 +211,6 @@ mqttClient.on("message", async (topic, message) => {
               status: "DISPENSING",
               targetMl,
               dispensedMl: currentMl,
-              weightGrams: currentMl,
               flowRate: 1.25,
             },
             timestamp: new Date().toISOString(),
@@ -235,7 +225,6 @@ mqttClient.on("message", async (topic, message) => {
               ...(cachedTelemetry || {}),
               status: "COMPLETED",
               dispensedMl: targetMl,
-              weightGrams: targetMl,
               flowRate: 0,
             };
 
@@ -247,7 +236,6 @@ mqttClient.on("message", async (topic, message) => {
               data: {
                 status: "COMPLETED",
                 dispensedMl: targetMl,
-                weightGrams: targetMl,
                 flowRate: 0,
                 message: "Target volume tercapai, pompa dimatikan otomatis.",
               },
@@ -349,6 +337,25 @@ mqttClient.on("message", async (topic, message) => {
           data: { status: "CANCELLED" },
         }).catch((e) => console.warn("[DB Cancel Warn]:", e.message));
       }
+    } else if (eventType === "get_packages") {
+      console.log(`[MQTT] Perangkat ${deviceCode} meminta sinkronisasi paket menu (get_packages)`);
+      try {
+        const packages = await prisma.packagePreset.findMany({
+          where: { isActive: true },
+          orderBy: { volumeMl: "asc" },
+          select: { id: true, name: true, volumeMl: true, price: true, code: true },
+        });
+        if (packages && packages.length > 0) {
+          mqttClient.publish(
+            `water/dispenser/${deviceCode}/packages`,
+            JSON.stringify({ packages }),
+            { qos: 1 }
+          );
+          console.log(`[MQTT BRIDGE] Berhasil merespon get_packages: ${packages.length} paket ke ${deviceCode}`);
+        }
+      } catch (err) {
+        console.error(`[GET_PACKAGES ERROR for ${deviceCode}]:`, (err as Error).message);
+      }
     }
 
     // Broadcast ke semua browser client via WebSocket
@@ -440,40 +447,57 @@ mqttClient.on("message", async (topic, message) => {
           }
         }
 
+        const rawStatus = (payload.status || "COMPLETED").toUpperCase();
+        const isFailed = rawStatus.includes("FAIL") || 
+                         rawStatus.includes("HABIS") || 
+                         rawStatus === "OVERWEIGHT" || 
+                         rawStatus === "EMERGENCY_STOPPED";
+
         if (targetTx) {
-          const finalDispensed = dispensed > 0 ? dispensed : targetTx.volumeMl;
+          const finalDispensed = dispensed;
+          const finalStatus = isFailed ? "FAILED" : "COMPLETED";
+
           const updatedTx = await prisma.transaction.update({
             where: { id: targetTx.id },
             data: {
-              status: "COMPLETED",
+              status: finalStatus,
               dispensedMl: finalDispensed,
               completedAt: new Date(),
             },
           });
-          console.log(`[DB SUCCESS] Transaksi ${updatedTx.orderId} (${updatedTx.id}) status berhasil diperbarui menjadi COMPLETED (${updatedTx.dispensedMl} mL).`);
+          console.log(`[DB STATUS] Transaksi ${updatedTx.orderId} (${updatedTx.id}) status diperbarui: ${finalStatus} (${updatedTx.dispensedMl} mL).`);
 
           // Catat ke Log Aktivitas
           await prisma.activityLog.create({
             data: {
-              level: "INFO",
-              action: "DISPENSE_COMPLETED",
-              message: `Pengisian air selesai (${finalDispensed} mL). Status transaksi COMPLETED.`,
+              level: isFailed ? "ERROR" : "INFO",
+              action: isFailed ? "PUMP_DRY_RUN_FAILED" : "DISPENSE_COMPLETED",
+              message: isFailed 
+                ? `Pengisian GAGAL (${rawStatus}): Air tidak naik. Terisi ${finalDispensed}/${targetTx.volumeMl} mL. Order: ${targetTx.orderId}` 
+                : `Pengisian air selesai (${finalDispensed} mL). Status transaksi COMPLETED.`,
               deviceId: targetTx.deviceId,
               metadata: {
                 orderId: targetTx.orderId,
                 dispensedMl: finalDispensed,
+                targetMl: targetTx.volumeMl,
+                amount: targetTx.amount,
+                reason: rawStatus,
                 deviceCode,
               },
             },
           }).catch(() => {});
+
+          await prisma.device.updateMany({
+            where: { code: deviceCode },
+            data: { status: isFailed ? "ERROR" : "READY" },
+          });
         } else {
           console.warn(`[DB WARN] Transaksi tidak ditemukan untuk event complete pada ${deviceCode} (txIdentifier: ${txIdentifier})`);
+          await prisma.device.updateMany({
+            where: { code: deviceCode },
+            data: { status: isFailed ? "ERROR" : "READY" },
+          });
         }
-
-        await prisma.device.updateMany({
-          where: { code: deviceCode },
-          data: { status: "READY" },
-        });
       }
     } catch (dbErr) {
       // Catch DB errors agar tidak memutus aliran real-time jika database sedang booting
@@ -507,7 +531,7 @@ wss.on("connection", (ws) => {
       console.log("[WS Received]:", msg);
 
       if (msg.type === "COMMAND") {
-        const { deviceId = "DISPENSER-01", action, volumeMl = 600, knownWeight, factor, maxWeight } = msg;
+        const { deviceId = "DISPENSER-01", action, volumeMl = 600 } = msg;
 
         let transactionId = `tx-${Date.now()}`;
 
@@ -554,7 +578,6 @@ wss.on("connection", (ws) => {
           cachedDeviceStatus = "READY";
           if (cachedTelemetry) {
             cachedTelemetry.dispensedMl = 0;
-            cachedTelemetry.weightGrams = 0;
             cachedTelemetry.targetMl = 0;
             cachedTelemetry.status = "READY";
           }
@@ -563,7 +586,7 @@ wss.on("connection", (ws) => {
             topic: `water/dispenser/${deviceId}/status`,
             deviceCode: deviceId,
             eventType: "status",
-            data: { status: "READY", dispensedMl: 0, weightGrams: 0, message: "Reset sesi pengisian berhasil" },
+            data: { status: "READY", dispensedMl: 0, message: "Reset sesi pengisian berhasil" },
             timestamp: new Date().toISOString(),
           });
         }
@@ -577,16 +600,6 @@ wss.on("connection", (ws) => {
           transactionId,
           timestamp: Date.now(),
         };
-
-        if (knownWeight !== undefined) {
-          commandPayload.knownWeight = Number(knownWeight);
-        }
-        if (factor !== undefined) {
-          commandPayload.factor = Number(factor);
-        }
-        if (maxWeight !== undefined) {
-          commandPayload.maxWeight = Number(maxWeight);
-        }
 
         mqttClient.publish(commandTopic, JSON.stringify(commandPayload), { qos: 1 });
         console.log(`[MQTT Published] To ${commandTopic}:`, commandPayload);

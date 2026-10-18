@@ -459,79 +459,182 @@ inline void showBootWifiScreen(const char* ssid, const char* ip, const char* sta
 }
 
 // ==============================================================================
-// 2. TAMPILAN MENU STANDBY (TATA LETAK VERTIKAL: TOMBOL DI BAWAH TEKS)
+// 1B. TAMPILAN LOADING MENU SEBELUM MENU PERTAMA DITAMPILKAN
+// ==============================================================================
+static int s_loadingStep = 0;
+static unsigned long s_lastLoadingAnim = 0;
+
+inline void showLoadingMenuScreen(const char* statusText = "Mengambil Daftar Menu...") {
+  currentScreen = SCREEN_LOADING;
+  s_loadingStep = 0;
+  s_lastLoadingAnim = millis();
+  tft.fillScreen(WV_BG_LIGHT);
+
+  // 1. Header Banner Biru Tua
+  tft.fillRect(0, 0, DISP_WIDTH, 34, WV_HEADER_BG);
+  tft.setTextColor(WV_TEXT_WHITE, WV_HEADER_BG);
+  tft.setTextSize(2);
+  tft.setCursor(30, 8);
+  tft.print("WATERVEND IoT");
+
+  // 2. Card Pusat Putih Elegan
+  int cardX = 12;
+  int cardY = 56;
+  int cardW = 216;
+  int cardH = 200;
+  tft.fillRoundRect(cardX, cardY, cardW, cardH, 8, WV_CARD_BG);
+  tft.drawRoundRect(cardX, cardY, cardW, cardH, 8, WV_CARD_BORDER);
+
+  // 3. Ikon Botol / Corong Air Minimalis di Tengah Card
+  int iconX = DISP_WIDTH / 2;
+  int iconY = 100;
+  tft.drawRoundRect(iconX - 22, iconY - 26, 44, 52, 6, WV_PRIMARY_BLUE);
+  tft.fillRect(iconX - 10, iconY - 34, 20, 8, WV_PRIMARY_BLUE);
+  tft.drawFastHLine(iconX - 16, iconY, 32, WV_ACCENT_CYAN);
+  tft.fillCircle(iconX, iconY + 10, 4, WV_ACCENT_CYAN);
+
+  // 4. Judul & Subtitle Loading
+  tft.setTextColor(WV_TEXT_DARK, WV_CARD_BG);
+  tft.setTextSize(2);
+  tft.setCursor(38, 142);
+  tft.print("MEMUAT MENU");
+
+  tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
+  tft.setTextSize(1);
+  tft.setCursor(24, 168);
+  char safeStatus[32];
+  snprintf(safeStatus, sizeof(safeStatus), "%.28s", statusText);
+  tft.print(safeStatus);
+
+  // 5. Track Bar Loading
+  int barX = 28;
+  int barY = 192;
+  int barW = 184;
+  int barH = 10;
+  tft.drawRoundRect(barX - 2, barY - 2, barW + 4, barH + 4, 4, WV_CARD_BORDER);
+  tft.fillRect(barX, barY, 20, barH, WV_PRIMARY_BLUE);
+
+  // 6. Footer Info
+  tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
+  tft.setTextSize(1);
+  tft.setCursor(26, 276);
+  tft.print("Sinkronisasi Database Cloud...");
+  tft.setCursor(44, 292);
+  tft.print("Mohon Tunggu Sebentar");
+}
+
+inline void updateLoadingMenuAnimation(int percent = -1) {
+  if (currentScreen != SCREEN_LOADING) return;
+
+  unsigned long now = millis();
+  if (now - s_lastLoadingAnim < 120 && percent < 0) return;
+  s_lastLoadingAnim = now;
+
+  int barX = 28;
+  int barY = 192;
+  int barW = 184;
+  int barH = 10;
+
+  if (percent >= 0) {
+    if (percent > 100) percent = 100;
+    int fillW = (barW * percent) / 100;
+    tft.fillRect(barX, barY, fillW, barH, WV_SUCCESS_GREEN);
+    if (fillW < barW) {
+      tft.fillRect(barX + fillW, barY, barW - fillW, barH, WV_CARD_BG);
+    }
+  } else {
+    // Animasi bergerak horizontal (indeterminate spinner / progress bar)
+    s_loadingStep = (s_loadingStep + 1) % 8;
+    int blockW = 40;
+    int maxTravel = barW - blockW;
+    int stepPos = (s_loadingStep < 4) ? (s_loadingStep * (maxTravel / 3)) : ((7 - s_loadingStep) * (maxTravel / 3));
+
+    tft.fillRect(barX, barY, barW, barH, WV_FOOTER_BG);
+    tft.fillRoundRect(barX + stepPos, barY, blockW, barH, 3, WV_PRIMARY_BLUE);
+
+    // Titik animasi di bawah teks "MEMUAT MENU..."
+    tft.fillRect(174, 142, 36, 16, WV_CARD_BG);
+    tft.setTextColor(WV_PRIMARY_BLUE, WV_CARD_BG);
+    tft.setTextSize(2);
+    tft.setCursor(174, 142);
+    int dotCount = (s_loadingStep % 3) + 1;
+    for (int d = 0; d < dotCount; d++) tft.print(".");
+  }
+}
+
+// ==============================================================================
+// 2. TAMPILAN MENU STANDBY (TATA LETAK ERGONOMIS: VISUAL WADAH & HARGA KONTRAS)
 // ==============================================================================
 inline void showStandbyScreen() {
   currentScreen = SCREEN_STANDBY;
   qrisStartTime = 0;
   qrisDurationSeconds = 300;
   isDispensing = false;
+  isDispensePaused = false;
+  isSwitchingBottle = false;
+  totalAccumulatedMl = 0;
+  holdButtonStartTime = 0;
   tft.fillScreen(WV_BG_LIGHT);
 
   // Header Banner Biru Tua Bersih
   tft.fillRect(0, 0, DISP_WIDTH, 34, WV_HEADER_BG);
   tft.setTextColor(WV_TEXT_WHITE, WV_HEADER_BG);
   tft.setTextSize(2);
-  tft.setCursor(25, 8);
+  tft.setCursor(20, 8);
   tft.print("PILIH AIR MINUM");
 
   // Status Indicator Dot di Kanan Atas
   tft.fillCircle(222, 16, 4, WV_SUCCESS_GREEN);
 
-  // Render Kartu Menu Paket Dinamis (Tata Letak Vertikal: Tombol di Bawah Teks)
-  int cardY = 38;
-  int cardH = 76;
-  int cardGap = 6;
+  // Render Kartu Menu Paket Dinamis (Tinggi 72px + Gap 8px)
+  int cardY = 40;
+  int cardH = 72;
+  int cardGap = 8;
   int maxDraw = (totalPackages > 3) ? 3 : totalPackages;
 
   for (int i = 0; i < maxDraw; i++) {
     int y = cardY + i * (cardH + cardGap);
-    uint16_t btnColor = (i == 0) ? WV_ACCENT_CYAN : ((i == 1) ? WV_PRIMARY_BLUE : WV_SUCCESS_GREEN);
+    uint16_t accentColor = (i == 0) ? WV_ACCENT_CYAN : ((i == 1) ? WV_PRIMARY_BLUE : WV_SUCCESS_GREEN);
 
     // 1. Background Kartu Putih Bersih dengan Border Halus
     tft.fillRoundRect(8, y, 224, cardH, 6, WV_CARD_BG);
     tft.drawRoundRect(8, y, 224, cardH, 6, WV_CARD_BORDER);
 
     // 2. Aksen Bar Kiri Vertikal Sesuai Tipe Ukuran
-    tft.fillRoundRect(10, y + 4, 4, cardH - 8, 2, btnColor);
+    tft.fillRoundRect(10, y + 4, 5, cardH - 8, 2, accentColor);
 
-    // 3. BARIS 1: Nama Paket di Bagian Atas Kartu (Font proporsional & truncate aman)
+    // 3. Nama Paket di Sisi Kiri Atas
     tft.setTextColor(WV_TEXT_BLACK, WV_CARD_BG);
     char pkgTitle[28];
     snprintf(pkgTitle, sizeof(pkgTitle), "%d. %.16s", i + 1, dispenserPackages[i].name);
-    // Jika nama cukup panjang (>14 karakter), gunakan font size 1 dengan styling jelas agar tidak kepotong
-    if (strlen(pkgTitle) > 16) {
-      tft.setTextSize(1);
-      tft.setCursor(20, y + 10);
-      tft.print(pkgTitle);
-    } else {
-      tft.setTextSize(2);
-      tft.setCursor(20, y + 8);
-      tft.print(pkgTitle);
-    }
+    tft.setTextSize(2);
+    tft.setCursor(20, y + 8);
+    tft.print(pkgTitle);
 
-    // 4. BARIS 2: Detail Volume & Harga di Bawah Nama
+    // 4. Baris Detail: Volume di Kiri & Harga Emerald di Kanan
     tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
     tft.setTextSize(1);
-    tft.setCursor(20, y + 28);
-    tft.printf("Volume: %d mL   |   ", dispenserPackages[i].volumeMl);
+    tft.setCursor(22, y + 28);
+    tft.printf("Isi: %d mL", dispenserPackages[i].volumeMl);
 
     tft.setTextColor(WV_TEXT_PRICE, WV_CARD_BG);
+    tft.setTextSize(2);
+    tft.setCursor(118, y + 24);
     tft.printf("Rp %ld", dispenserPackages[i].price);
 
-    // 5. BARIS 3: Tombol PILIH di Bawah Teks (Menempati Lebar Penuh Kartu)
-    int btnY = y + 44;
-    int btnH = 24;
-    int btnW = 202;
-    tft.fillRoundRect(18, btnY, btnW, btnH, 4, btnColor);
-    tft.setTextColor(WV_TEXT_WHITE, btnColor);
+    // 5. Tombol Pill Pilih di Bawah
+    int btnY = y + 46;
+    int btnH = 20;
+    int btnW = 204;
+    tft.fillRoundRect(18, btnY, btnW, btnH, 4, accentColor);
+    tft.setTextColor(WV_TEXT_WHITE, accentColor);
     tft.setTextSize(1);
-    tft.setCursor(55, btnY + 8);
-    tft.print("[ PILIH UKURAN INI > ]");
+    tft.setCursor(48, btnY + 6);
+    tft.print("[ SENTUH UNTUK MEMILIH > ]");
   }
 
   // Footer Status Sistem & Panduan Pelanggan
-  int footerY = 284;
+  int footerY = 282;
   tft.fillRect(0, footerY, DISP_WIDTH, DISP_HEIGHT - footerY, WV_FOOTER_BG);
   tft.drawFastHLine(0, footerY, DISP_WIDTH, WV_CARD_BORDER);
 
@@ -542,17 +645,40 @@ inline void showStandbyScreen() {
 
   tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
   tft.setCursor(14, footerY + 20);
-  tft.printf("Debit: %.1f mL/s  |  WiFi: OK  |  v2.1", pumpFlowRateMlPerSec);
+  tft.printf("Debit: %.1f mL/s  |  Tatakan Bersih  |  v2.2", pumpFlowRateMlPerSec);
 }
 
 // ==============================================================================
-// 3. TAMPILAN QRIS FULL SCREEN DENGAN COUNTDOWN 5 MENIT (300 DETIK)
+// 3. TAMPILAN QRIS FULL SCREEN DENGAN COUNTDOWN & TOMBOL BATAL DENGAN ARAHAN
 // ==============================================================================
+inline void resetCancelQRISButton() {
+  tft.fillRoundRect(8, 282, 224, 34, 4, WV_DANGER_RED);
+  tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
+  tft.setTextSize(1);
+  tft.setCursor(44, 287);
+  tft.print("[ X  BATALKAN PESANAN ]");
+  tft.setCursor(22, 301);
+  tft.print("Tahan tombol 1 detik untuk batal");
+}
+
+inline void drawHoldProgressCancelQRIS(int progressPercent) {
+  int barW = (224 * progressPercent) / 100;
+  if (barW > 224) barW = 224;
+  tft.fillRoundRect(8, 282, 224, 34, 4, WV_DANGER_RED);
+  tft.fillRect(8, 282, barW, 34, WV_TEXT_BLACK);
+  tft.drawRoundRect(8, 282, 224, 34, 4, WV_TEXT_WHITE);
+  tft.setTextColor(WV_TEXT_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(55, 294);
+  tft.printf("MEMBATALKAN... %d%%", progressPercent);
+}
+
 inline void showQRISScreen(const char* nominal, const char* qrPayload, unsigned long durationSec = 300) {
   currentScreen = SCREEN_QRIS;
   qrisStartTime = millis();
   qrisDurationSeconds = (durationSec >= 60) ? durationSec : 300;
   lastCountdownSecond = qrisDurationSeconds + 1;
+  holdButtonStartTime = 0;
   strncpy(activeNominalStr, nominal, sizeof(activeNominalStr) - 1);
   strncpy(activeQrPayload, qrPayload, sizeof(activeQrPayload) - 1);
   tft.fillScreen(WV_BG_LIGHT);
@@ -576,9 +702,9 @@ inline void showQRISScreen(const char* nominal, const char* qrPayload, unsigned 
   int qrY = 26;
   drawQR(qrPayload, 0, qrY);
 
-  // 3. Frame Kotak Countdown Timer (Y: 250 - 284 pada layar 320px)
-  int boxY = (DISP_HEIGHT > 240) ? 250 : 208;
-  int boxH = (DISP_HEIGHT > 240) ? 34 : 28;
+  // 3. Frame Kotak Countdown Timer (Y: 244 - 276 pada layar 320px)
+  int boxY = 244;
+  int boxH = 32;
 
   tft.fillRoundRect(8, boxY, 224, boxH, 6, WV_FOOTER_BG);
   tft.drawRoundRect(8, boxY, 224, boxH, 6, WV_PRIMARY_BLUE);
@@ -588,19 +714,13 @@ inline void showQRISScreen(const char* nominal, const char* qrPayload, unsigned 
   tft.setCursor(14, boxY + (boxH - 16) / 2);
   tft.printf("WAKTU: %02lu:%02lu", durationSec / 60, durationSec % 60);
 
-  if (DISP_HEIGHT > 240) {
-    tft.setTextSize(1);
-    tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
-    tft.setCursor(162, boxY + 13);
-    tft.print("SCAN HP");
+  tft.setTextSize(1);
+  tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+  tft.setCursor(162, boxY + 11);
+  tft.print("SCAN HP");
 
-    // 4. Tombol Sentuh Batal di Paling Bawah (Y: 290 - 316)
-    tft.fillRoundRect(8, 290, 224, 26, 4, WV_DANGER_RED);
-    tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
-    tft.setTextSize(1);
-    tft.setCursor(68, 298);
-    tft.print("[ X  BATALKAN PESANAN ]");
-  }
+  // 4. Tombol Sentuh Batal dengan Arahan Jelas (Y: 282 - 316)
+  resetCancelQRISButton();
 }
 
 inline void updateQRISCountdown(unsigned long remainingSeconds) {
@@ -611,8 +731,8 @@ inline void updateQRISCountdown(unsigned long remainingSeconds) {
   unsigned long mins = remainingSeconds / 60;
   unsigned long secs = remainingSeconds % 60;
 
-  int boxY = (DISP_HEIGHT > 240) ? 250 : 208;
-  int boxH = (DISP_HEIGHT > 240) ? 34 : 28;
+  int boxY = 244;
+  int boxH = 32;
 
   uint16_t borderColor = (remainingSeconds <= 30) ? WV_DANGER_RED : ((remainingSeconds <= 60) ? WV_WARNING_AMBER : WV_PRIMARY_BLUE);
   uint16_t textColor   = (remainingSeconds <= 30) ? WV_DANGER_RED : WV_TEXT_BLACK;
@@ -626,17 +746,15 @@ inline void updateQRISCountdown(unsigned long remainingSeconds) {
   tft.setCursor(14, boxY + (boxH - 16) / 2);
   tft.printf("WAKTU: %02lu:%02lu", mins, secs);
 
-  if (DISP_HEIGHT > 240) {
-    tft.setTextSize(1);
-    if (remainingSeconds <= 30) {
-      tft.setTextColor(WV_DANGER_RED, WV_FOOTER_BG);
-      tft.setCursor(162, boxY + 13);
-      tft.print("HABIS!");
-    } else {
-      tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
-      tft.setCursor(162, boxY + 13);
-      tft.print("SCAN HP");
-    }
+  tft.setTextSize(1);
+  if (remainingSeconds <= 30) {
+    tft.setTextColor(WV_DANGER_RED, WV_FOOTER_BG);
+    tft.setCursor(162, boxY + 11);
+    tft.print("HABIS!");
+  } else {
+    tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+    tft.setCursor(162, boxY + 11);
+    tft.print("SCAN HP");
   }
 }
 
@@ -650,71 +768,73 @@ inline void showPlaceTumblerScreen(unsigned long targetMl, const char* orderId =
   currentScreen = SCREEN_PLACE_TUMBLER;
   s_placeTumblerFirstDraw = true;
   s_lastTumblerStateShown = -1;
+  holdButtonStartTime = 0;
   tft.fillScreen(WV_BG_LIGHT);
 
-  // Header Hijau Sukses
+  // 1. Header Hijau Sukses (Y: 0..34)
   tft.fillRect(0, 0, DISP_WIDTH, 34, WV_SUCCESS_GREEN);
   tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
   tft.setTextSize(2);
-  tft.setCursor(12, 8);
+  tft.setCursor(14, 8);
   tft.print("PEMBAYARAN LUNAS!");
 
-  // Box Panduan Customer (Putih dengan Border Halus)
-  tft.fillRoundRect(8, 42, 224, 110, 6, WV_CARD_BG);
-  tft.drawRoundRect(8, 42, 224, 110, 6, WV_CARD_BORDER);
+  // 2. Box Panduan Customer (Y: 40..126, H=86)
+  tft.fillRoundRect(8, 40, 224, 86, 6, WV_CARD_BG);
+  tft.drawRoundRect(8, 40, 224, 86, 6, WV_CARD_BORDER);
 
   tft.setTextColor(WV_PRIMARY_BLUE, WV_CARD_BG);
   tft.setTextSize(2);
-  tft.setCursor(18, 50);
+  tft.setCursor(18, 48);
   tft.printf("Target: %lu mL", targetMl);
 
   tft.setTextColor(WV_TEXT_BLACK, WV_CARD_BG);
   tft.setTextSize(1);
-  tft.setCursor(18, 74);
-  tft.print("INSTRUKSI PENGISIAN:");
+  tft.setCursor(18, 72);
+  tft.print("1. Letakkan botol di bawah corong");
+  tft.setCursor(18, 88);
+  tft.print("2. Tekan MULAI saat wadah terdeteksi");
 
   tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
-  tft.setCursor(18, 90);
-  tft.print("1. Letakkan botol / tumbler Anda");
-  tft.setCursor(18, 102);
-  tft.print("   tepat di bawah corong air.");
+  tft.setCursor(18, 106);
+  tft.print("(Pastikan tepat di bawah corong)");
 
-  tft.setTextColor(WV_SUCCESS_GREEN, WV_CARD_BG);
-  tft.setCursor(18, 122);
-  tft.print("2. Tekan tombol [MULAI] di bawah:");
-
-  // Tombol Sentuh Besar [MULAI PENGISIAN]
-  int btnY = 160;
-  int btnH = 54;
-  tft.fillRoundRect(8, btnY, 224, btnH, 8, WV_SUCCESS_GREEN);
-  tft.drawRoundRect(8, btnY, 224, btnH, 8, WV_HEADER_BG);
-
-  tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
-  tft.setTextSize(2);
-  tft.setCursor(24, btnY + 12);
-  tft.print("MULAI ISI AIR >");
-
+  // 3. Footer Tip (Y: 296..316)
+  tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
   tft.setTextSize(1);
-  tft.setCursor(28, btnY + 36);
-  tft.print("Sentuh di sini untuk mengalirkan air");
+  tft.setCursor(14, 298);
+  tft.print("*Pengisian otomatis jeda jika botol diangkat");
 }
 
 inline void updatePlaceTumblerUI(bool isPresent, float distCm) {
   if (currentScreen != SCREEN_PLACE_TUMBLER) return;
 
-  // 0 = Belum ada wadah, 1 = Ada wadah tapi menstabilkan tare, 2 = Tare selesai & siap
-  int currentState = !isPresent ? 0 : (!isAutoTareDone ? 1 : 2);
+  // 0 = Belum ada wadah, 1 = Wadah terdeteksi (Siap)
+  int currentState = isPresent ? 1 : 0;
   if (s_placeTumblerFirstDraw || currentState != s_lastTumblerStateShown) {
     s_placeTumblerFirstDraw = false;
     s_lastTumblerStateShown = currentState;
 
-    int btnY = 160;
-    int btnH = 54;
-    int badgeY = 226;
-    int badgeH = 50;
+    int badgeY = 132;
+    int badgeH = 44;
+    int btnY = 182;
+    int btnH = 56;
+    int guideY = 244;
+    int guideH = 44;
 
-    if (currentState == 2) {
-      // Wadah Siap & Auto-Tare Selesai (Hijau Sukses)
+    if (currentState == 1) {
+      // Wadah Siap Terdeteksi (Hijau Sukses)
+      tft.fillRoundRect(8, badgeY, 224, badgeH, 6, WV_FOOTER_BG);
+      tft.drawRoundRect(8, badgeY, 224, badgeH, 6, WV_SUCCESS_GREEN);
+      tft.setTextColor(WV_SUCCESS_GREEN, WV_FOOTER_BG);
+      tft.setTextSize(1);
+      tft.setCursor(18, badgeY + 6);
+      tft.print("[ STATUS SENSOR WADAH ]");
+      tft.setTextColor(WV_TEXT_BLACK, WV_FOOTER_BG);
+      tft.setTextSize(2);
+      tft.setCursor(18, badgeY + 22);
+      tft.printf("SIAP (Jarak: %.1f cm)", distCm);
+
+      // Tombol MULAI ISI AIR > (Hijau Aktif)
       tft.fillRoundRect(8, btnY, 224, btnH, 8, WV_SUCCESS_GREEN);
       tft.drawRoundRect(8, btnY, 224, btnH, 8, WV_HEADER_BG);
       tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
@@ -722,45 +842,34 @@ inline void updatePlaceTumblerUI(bool isPresent, float distCm) {
       tft.setCursor(24, btnY + 12);
       tft.print("MULAI ISI AIR >");
       tft.setTextSize(1);
-      tft.setCursor(28, btnY + 36);
+      tft.setCursor(26, btnY + 36);
       tft.print("Sentuh di sini untuk mengalirkan air");
 
-      tft.fillRoundRect(8, badgeY, 224, badgeH, 6, WV_FOOTER_BG);
-      tft.drawRoundRect(8, badgeY, 224, badgeH, 6, WV_SUCCESS_GREEN);
-      tft.setTextColor(WV_SUCCESS_GREEN, WV_FOOTER_BG);
+      // Petunjuk Tambahan
+      tft.fillRoundRect(8, guideY, 224, guideH, 6, WV_CARD_BG);
+      tft.drawRoundRect(8, guideY, 224, guideH, 6, WV_CARD_BORDER);
+      tft.setTextColor(WV_PRIMARY_BLUE, WV_CARD_BG);
       tft.setTextSize(1);
-      tft.setCursor(18, badgeY + 8);
-      tft.print("[ STATUS TIMBANGAN & WADAH ]");
-      tft.setTextColor(WV_TEXT_BLACK, WV_FOOTER_BG);
-      tft.setTextSize(2);
-      tft.setCursor(18, badgeY + 24);
-      tft.printf("SIAP (Tara: %.0fg)", containerTareWeight);
-    }
-    else if (currentState == 1) {
-      // Wadah Terdeteksi tapi Masih Menstabilkan (Kuning Amber)
-      tft.fillRoundRect(8, btnY, 224, btnH, 8, WV_FOOTER_BG);
-      tft.drawRoundRect(8, btnY, 224, btnH, 8, WV_WARNING_AMBER);
-      tft.setTextColor(WV_WARNING_AMBER, WV_FOOTER_BG);
-      tft.setTextSize(2);
-      tft.setCursor(35, btnY + 12);
-      tft.print("MENIMBANG...");
-      tft.setTextSize(1);
-      tft.setCursor(28, btnY + 36);
-      tft.print("Lepaskan tangan dari wadah");
-
-      tft.fillRoundRect(8, badgeY, 224, badgeH, 6, WV_FOOTER_BG);
-      tft.drawRoundRect(8, badgeY, 224, badgeH, 6, WV_WARNING_AMBER);
-      tft.setTextColor(WV_WARNING_AMBER, WV_FOOTER_BG);
-      tft.setTextSize(1);
-      tft.setCursor(18, badgeY + 8);
-      tft.print("[ STATUS TIMBANGAN & WADAH ]");
-      tft.setTextColor(WV_WARNING_AMBER, WV_FOOTER_BG);
-      tft.setTextSize(2);
-      tft.setCursor(18, badgeY + 24);
-      tft.printf("STABILKAN (%.0fg)", currentLiveWeight);
+      tft.setCursor(22, guideY + 10);
+      tft.print("Sensor ultrasonik mendeteksi wadah.");
+      tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
+      tft.setCursor(22, guideY + 26);
+      tft.print("Air akan mengalir otomatis sesuai kuota.");
     }
     else {
       // Wadah Belum Diletakkan (Abu-abu Muted)
+      tft.fillRoundRect(8, badgeY, 224, badgeH, 6, WV_FOOTER_BG);
+      tft.drawRoundRect(8, badgeY, 224, badgeH, 6, WV_CARD_BORDER);
+      tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+      tft.setTextSize(1);
+      tft.setCursor(18, badgeY + 6);
+      tft.print("[ STATUS SENSOR WADAH ]");
+      tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+      tft.setTextSize(2);
+      tft.setCursor(18, badgeY + 22);
+      tft.print("PASANG WADAH...");
+
+      // Tombol Disabled Muted
       tft.fillRoundRect(8, btnY, 224, btnH, 8, WV_FOOTER_BG);
       tft.drawRoundRect(8, btnY, 224, btnH, 8, WV_CARD_BORDER);
       tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
@@ -771,16 +880,13 @@ inline void updatePlaceTumblerUI(bool isPresent, float distCm) {
       tft.setCursor(28, btnY + 36);
       tft.print("Letakkan botol pada tatakan");
 
-      tft.fillRoundRect(8, badgeY, 224, badgeH, 6, WV_FOOTER_BG);
-      tft.drawRoundRect(8, badgeY, 224, badgeH, 6, WV_WARNING_AMBER);
-      tft.setTextColor(WV_WARNING_AMBER, WV_FOOTER_BG);
+      // Card Petunjuk
+      tft.fillRoundRect(8, guideY, 224, guideH, 6, WV_FOOTER_BG);
+      tft.drawRoundRect(8, guideY, 224, guideH, 6, WV_CARD_BORDER);
+      tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
       tft.setTextSize(1);
-      tft.setCursor(18, badgeY + 8);
-      tft.print("[ STATUS TIMBANGAN & WADAH ]");
-      tft.setTextColor(WV_WARNING_AMBER, WV_FOOTER_BG);
-      tft.setTextSize(2);
-      tft.setCursor(18, badgeY + 24);
-      tft.print("LETAKKAN BOTOL...");
+      tft.setCursor(22, guideY + 16);
+      tft.print("Pastikan botol berada di bawah corong");
     }
   }
 }
@@ -790,6 +896,34 @@ inline void updatePlaceTumblerUI(bool isPresent, float distCm) {
 // ==============================================================================
 static bool s_lastDispensePauseState = false;
 
+inline void resetStopDispensingButton() {
+  int btnY = 186;
+  int btnH = 46;
+  tft.fillRoundRect(8, btnY, 224, btnH, 6, WV_DANGER_RED);
+  tft.drawRoundRect(8, btnY, 224, btnH, 6, WV_TEXT_WHITE);
+  tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
+  tft.setTextSize(2);
+  tft.setCursor(28, btnY + 8);
+  tft.print("[ STOP DARURAT ]");
+  tft.setTextSize(1);
+  tft.setCursor(24, btnY + 30);
+  tft.print("Tahan tombol 1 detik untuk berhenti");
+}
+
+inline void drawHoldProgressStopDispensing(int progressPercent) {
+  int btnY = 186;
+  int btnH = 46;
+  int barW = (224 * progressPercent) / 100;
+  if (barW > 224) barW = 224;
+  tft.fillRoundRect(8, btnY, 224, btnH, 6, WV_DANGER_RED);
+  tft.fillRect(8, btnY, barW, btnH, WV_TEXT_BLACK);
+  tft.drawRoundRect(8, btnY, 224, btnH, 6, WV_TEXT_WHITE);
+  tft.setTextColor(WV_TEXT_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(44, btnY + 18);
+  tft.printf("MENGHENTIKAN... %d%%", progressPercent);
+}
+
 inline void showDispensingScreen(unsigned long targetMl) {
   currentScreen = SCREEN_DISPENSING;
   lastMlShown = 999999;
@@ -797,54 +931,187 @@ inline void showDispensingScreen(unsigned long targetMl) {
   animationFrame = 0;
   lastAnimationTime = millis();
   s_lastDispensePauseState = false;
+  holdButtonStartTime = 0;
   tft.fillScreen(WV_BG_LIGHT);
 
-  // Header Banner Biru
+  // 1. Header Banner Biru (Y: 0..32)
   tft.fillRect(0, 0, DISP_WIDTH, 32, WV_HEADER_BG);
   tft.setTextColor(WV_TEXT_WHITE, WV_HEADER_BG);
   tft.setTextSize(2);
   tft.setCursor(35, 7);
   tft.print("PENGISIAN AIR");
 
-  tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
-  tft.setTextSize(1);
-  tft.setCursor(18, 38);
-  tft.print("Air Sedang Mengalir, Harap Tunggu...");
-
+  // 2. Subheader
   tft.setTextColor(WV_PRIMARY_BLUE, WV_BG_LIGHT);
   tft.setTextSize(2);
-  tft.setCursor(18, 54);
+  tft.setCursor(14, 38);
   tft.printf("Target: %lu mL", targetMl);
 
-  // Outline Wadah Animasi di sebelah kanan (X: 170, Y: 76, W: 50, H: 80)
-  tft.drawRect(170, 76, 50, 80, WV_TEXT_BLACK);
-  tft.drawFastHLine(170, 96, 8, WV_PRIMARY_BLUE);  // Garis takaran 75%
-  tft.drawFastHLine(170, 116, 12, WV_PRIMARY_BLUE); // Garis takaran 50%
-  tft.drawFastHLine(170, 136, 8, WV_PRIMARY_BLUE); // Garis takaran 25%
-  tft.fillRect(185, 70, 20, 6, WV_PRIMARY_BLUE); // Corong dispenser di atas
+  tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
+  tft.setTextSize(1);
+  tft.setCursor(14, 58);
+  tft.print("Air sedang mengalir ke wadah...");
 
-  // Info Volume Terisi
+  // 3. Outline Wadah Animasi di sebelah kanan (X: 168, Y: 68, W: 54, H: 76)
+  tft.drawRect(168, 68, 54, 76, WV_TEXT_BLACK);
+  tft.drawFastHLine(168, 88, 8, WV_PRIMARY_BLUE);   // 75%
+  tft.drawFastHLine(168, 106, 12, WV_PRIMARY_BLUE); // 50%
+  tft.drawFastHLine(168, 124, 8, WV_PRIMARY_BLUE);  // 25%
+  tft.fillRect(185, 62, 20, 6, WV_PRIMARY_BLUE);    // Corong
+
+  // 4. Info Volume Terisi Digital di Kiri
   tft.setTextColor(WV_TEXT_DARK, WV_BG_LIGHT);
   tft.setTextSize(1);
-  tft.setCursor(18, 80);
+  tft.setCursor(14, 76);
   tft.print("Volume Terisi:");
 
-  tft.setCursor(18, 122);
-  tft.print("Kecepatan Aliran:");
+  tft.setCursor(14, 114);
+  tft.print("Kecepatan Pompa:");
 
-  // Frame Progress Bar Rounded
-  tft.drawRoundRect(14, 168, 212, 20, 4, WV_CARD_BORDER);
+  // 5. Frame Progress Bar Rounded (Y: 154..176)
+  tft.drawRoundRect(8, 154, 224, 22, 4, WV_CARD_BORDER);
 
-  // Tombol Sentuh STOP DARURAT
-  tft.fillRoundRect(14, 196, 212, 34, 6, WV_DANGER_RED);
-  tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
+  // 6. Tombol Sentuh STOP DARURAT dengan Arahan Jelas (Y: 186..232)
+  resetStopDispensingButton();
+
+  // 7. Footer Peringatan
+  tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
   tft.setTextSize(1);
-  tft.setCursor(44, 208);
-  tft.print("[ STOP DARURAT / BATAL ]");
+  tft.setCursor(14, 240);
+  tft.print("*Timbangan aktif: Jangan sentuh wadah");
+  tft.setCursor(14, 254);
+  tft.print("  saat air sedang mengalir");
+}
+
+// ==============================================================================
+// 5B. TAMPILAN GANTI BOTOL BARU (MULTI-BOTOL DISPENSING)
+// ==============================================================================
+static bool s_switchBottleFirstDraw = true;
+static int  s_lastSwitchBottleStateShown = -1;
+
+inline void showSwitchBottleScreen(unsigned long alreadyDispensedMl, unsigned long targetMl) {
+  s_switchBottleFirstDraw = true;
+  s_lastSwitchBottleStateShown = -1;
+  tft.fillRect(0, 32, DISP_WIDTH, DISP_HEIGHT - 32, WV_BG_LIGHT);
+
+  // 1. Header Banner Ganti Botol (Biru Royal)
+  tft.fillRect(0, 0, DISP_WIDTH, 32, WV_PRIMARY_BLUE);
+  tft.setTextColor(WV_TEXT_WHITE, WV_PRIMARY_BLUE);
+  tft.setTextSize(2);
+  tft.setCursor(22, 7);
+  tft.print("GANTI BOTOL BARU");
+
+  // 2. Kartu Rincian Akumulasi & Sisa Kuota
+  tft.fillRoundRect(8, 38, 224, 62, 6, WV_CARD_BG);
+  tft.drawRoundRect(8, 38, 224, 62, 6, WV_CARD_BORDER);
+
+  tft.setTextColor(WV_TEXT_DARK, WV_CARD_BG);
+  tft.setTextSize(1);
+  tft.setCursor(16, 46);
+  tft.printf("Sudah Terisi : %lu mL (Botol Selesai)", alreadyDispensedMl);
+
+  unsigned long remainingMl = (targetMl > alreadyDispensedMl) ? (targetMl - alreadyDispensedMl) : 0;
+  tft.setTextColor(WV_PRIMARY_BLUE, WV_CARD_BG);
+  tft.setCursor(16, 62);
+  tft.printf("Sisa Kuota   : %lu mL (Akan Diisi)", remainingMl);
+
+  tft.setTextColor(WV_SUCCESS_GREEN, WV_CARD_BG);
+  tft.setCursor(16, 80);
+  tft.print("1. Angkat botol lama & pasang botol baru");
+
+  // 3. Status Badge & Tombol Utama akan dirender dinamis oleh updateSwitchBottleUI()
+
+  // 4. Tombol 2: SELESAI (SUDAH CUKUP) (Y: 226..268)
+  int btnDoneY = 226;
+  int btnDoneH = 42;
+  tft.fillRoundRect(8, btnDoneY, 224, btnDoneH, 6, WV_FOOTER_BG);
+  tft.drawRoundRect(8, btnDoneY, 224, btnDoneH, 6, WV_PRIMARY_BLUE);
+  tft.setTextColor(WV_PRIMARY_BLUE, WV_FOOTER_BG);
+  tft.setTextSize(1);
+  tft.setCursor(32, btnDoneY + 10);
+  tft.print("[ SELESAI (SUDAH CUKUP) ]");
+  tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+  tft.setCursor(20, btnDoneY + 26);
+  tft.printf("Akhiri pengisian di volume %lu mL", alreadyDispensedMl);
+
+  // 5. Tombol 3: KEMBALI KE JEDA (Y: 274..314)
+  int btnBackY = 274;
+  int btnBackH = 38;
+  tft.fillRoundRect(8, btnBackY, 224, btnBackH, 6, WV_FOOTER_BG);
+  tft.drawRoundRect(8, btnBackY, 224, btnBackH, 6, WV_CARD_BORDER);
+  tft.setTextColor(WV_TEXT_DARK, WV_FOOTER_BG);
+  tft.setTextSize(1);
+  tft.setCursor(26, btnBackY + 14);
+  tft.print("[ < BATALKAN GANTI BOTOL ]");
+}
+
+inline void updateSwitchBottleUI(bool isPresent) {
+  if (currentScreen != SCREEN_DISPENSING || !isSwitchingBottle) return;
+
+  // 0 = Belum ada wadah baru, 2 = Wadah baru siap terdeteksi
+  int currentState = isPresent ? 2 : 0;
+  if (s_switchBottleFirstDraw || currentState != s_lastSwitchBottleStateShown) {
+    s_switchBottleFirstDraw = false;
+    s_lastSwitchBottleStateShown = currentState;
+
+    int badgeY = 106;
+    int badgeH = 50;
+    int btnActionY = 162;
+    int btnActionH = 56;
+
+    if (currentState == 2) {
+      // Wadah Baru Siap
+      tft.fillRoundRect(8, badgeY, 224, badgeH, 6, WV_FOOTER_BG);
+      tft.drawRoundRect(8, badgeY, 224, badgeH, 6, WV_SUCCESS_GREEN);
+      tft.setTextColor(WV_SUCCESS_GREEN, WV_FOOTER_BG);
+      tft.setTextSize(1);
+      tft.setCursor(18, badgeY + 6);
+      tft.print("[ STATUS BOTOL BARU ]");
+      tft.setTextColor(WV_TEXT_BLACK, WV_FOOTER_BG);
+      tft.setTextSize(2);
+      tft.setCursor(18, badgeY + 22);
+      tft.print("BOTOL TERDETEKSI");
+
+      // Tombol MULAI ISI BOTOL > (Hijau Aktif)
+      tft.fillRoundRect(8, btnActionY, 224, btnActionH, 8, WV_SUCCESS_GREEN);
+      tft.drawRoundRect(8, btnActionY, 224, btnActionH, 8, WV_HEADER_BG);
+      tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
+      tft.setTextSize(2);
+      tft.setCursor(16, btnActionY + 12);
+      tft.print("MULAI ISI BOTOL >");
+      tft.setTextSize(1);
+      tft.setCursor(20, btnActionY + 36);
+      tft.print("Sentuh untuk mengalirkan sisa air");
+    }
+    else {
+      // Wadah Belum Diletakkan
+      tft.fillRoundRect(8, badgeY, 224, badgeH, 6, WV_FOOTER_BG);
+      tft.drawRoundRect(8, badgeY, 224, badgeH, 6, WV_CARD_BORDER);
+      tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+      tft.setTextSize(1);
+      tft.setCursor(18, badgeY + 6);
+      tft.print("[ STATUS BOTOL BARU ]");
+      tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+      tft.setTextSize(2);
+      tft.setCursor(18, badgeY + 22);
+      tft.print("PASANG BOTOL BARU");
+
+      // Tombol Disabled Muted
+      tft.fillRoundRect(8, btnActionY, 224, btnActionH, 8, WV_FOOTER_BG);
+      tft.drawRoundRect(8, btnActionY, 224, btnActionH, 8, WV_CARD_BORDER);
+      tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+      tft.setTextSize(2);
+      tft.setCursor(25, btnActionY + 12);
+      tft.print("MENUNGGU BOTOL");
+      tft.setTextSize(1);
+      tft.setCursor(18, btnActionY + 36);
+      tft.print("Letakkan botol baru pada tatakan");
+    }
+  }
 }
 
 inline void updateDispensingAnimation(unsigned long dispensedMl, unsigned long targetMl) {
-  if (currentScreen != SCREEN_DISPENSING) return;
+  if (currentScreen != SCREEN_DISPENSING || isSwitchingBottle) return;
 
   unsigned long now = millis();
   float pct = (targetMl > 0) ? ((float)dispensedMl / (float)targetMl) : 0.0f;
@@ -866,53 +1133,64 @@ inline void updateDispensingAnimation(unsigned long dispensedMl, unsigned long t
       tft.print("!! WADAH TERLEPAS: POMPA DIJEDA !!");
 
       // Kartu Info Terisi & Sisa Air
-      tft.fillRoundRect(8, 64, 224, 60, 6, WV_CARD_BG);
-      tft.drawRoundRect(8, 64, 224, 60, 6, WV_CARD_BORDER);
+      tft.fillRoundRect(8, 62, 224, 60, 6, WV_CARD_BG);
+      tft.drawRoundRect(8, 62, 224, 60, 6, WV_CARD_BORDER);
 
       tft.setTextColor(WV_TEXT_DARK, WV_CARD_BG);
       tft.setTextSize(1);
-      tft.setCursor(16, 72);
-      tft.printf("Sudah Terisi : %lu mL (%.1f g)", dispensedMl, dispensedWeightGrams);
+      tft.setCursor(16, 70);
+      tft.printf("Sudah Terisi : %lu mL", dispensedMl);
 
       unsigned long remainingMl = (targetMl > dispensedMl) ? (targetMl - dispensedMl) : 0;
       tft.setTextColor(WV_PRIMARY_BLUE, WV_CARD_BG);
-      tft.setCursor(16, 88);
-      tft.printf("Sisa Air     : %lu mL (%.1f g)", remainingMl, (float)remainingMl);
+      tft.setCursor(16, 86);
+      tft.printf("Sisa Kuota   : %lu mL", remainingMl);
 
       tft.setTextColor(WV_SUCCESS_GREEN, WV_CARD_BG);
-      tft.setCursor(16, 106);
-      tft.print(">> Pasang wadah untuk OTOMATIS LANJUT");
+      tft.setCursor(16, 104);
+      tft.print(">> Pasang botol lama untuk AUTO LANJUT");
 
-      // Tombol 1: SELESAI (CUKUP)
-      int btnSelesaiY = 132;
-      int btnSelesaiH = 46;
+      // Tombol 1: GANTI BOTOL LAIN (Y: 128..172)
+      int btnSwitchY = 128;
+      int btnSwitchH = 44;
+      tft.fillRoundRect(8, btnSwitchY, 224, btnSwitchH, 6, WV_PRIMARY_BLUE);
+      tft.setTextColor(WV_TEXT_WHITE, WV_PRIMARY_BLUE);
+      tft.setTextSize(2);
+      tft.setCursor(24, btnSwitchY + 7);
+      tft.print("+ GANTI BOTOL");
+      tft.setTextSize(1);
+      tft.setCursor(20, btnSwitchY + 28);
+      tft.print("Nolkan wadah baru untuk sisa air");
+
+      // Tombol 2: SELESAI (CUKUP) (Y: 178..222)
+      int btnSelesaiY = 178;
+      int btnSelesaiH = 44;
       tft.fillRoundRect(8, btnSelesaiY, 224, btnSelesaiH, 6, WV_SUCCESS_GREEN);
       tft.drawRoundRect(8, btnSelesaiY, 224, btnSelesaiH, 6, WV_HEADER_BG);
       tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
       tft.setTextSize(2);
-      tft.setCursor(20, btnSelesaiY + 8);
+      tft.setCursor(20, btnSelesaiY + 7);
       tft.print("SELESAI (CUKUP)");
       tft.setTextSize(1);
-      tft.setCursor(20, btnSelesaiY + 30);
+      tft.setCursor(20, btnSelesaiY + 28);
       tft.print("Akhiri pengisian di volume ini");
 
-      // Tombol 2: STOP DARURAT / BATAL
-      int btnStopY = 186;
-      int btnStopH = 46;
+      // Tombol 3: STOP DARURAT / BATAL (Y: 228..268)
+      int btnStopY = 228;
+      int btnStopH = 40;
       tft.fillRoundRect(8, btnStopY, 224, btnStopH, 6, WV_DANGER_RED);
       tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
-      tft.setTextSize(2);
-      tft.setCursor(28, btnStopY + 8);
-      tft.print("STOP / BATAL");
       tft.setTextSize(1);
-      tft.setCursor(28, btnStopY + 30);
-      tft.print("Hentikan pengisian seketika");
+      tft.setCursor(38, btnStopY + 14);
+      tft.print("[ X  BATALKAN PENGISIAN ]");
 
-      // Baris Status Timeout Jeda
+      // Baris Status Timeout Jeda (Y: 274)
       tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
       tft.setTextSize(1);
-      tft.setCursor(16, 242);
-      tft.print("Batas jeda: 60 detik sebelum otomatis selesai");
+      tft.setCursor(14, 274);
+      tft.print("Batas jeda: 60 detik sebelum auto selesai");
+      tft.setCursor(14, 290);
+      tft.print("Pasang botol lama untuk lanjut seketika");
     } else {
       // TAMPILAN RESUME: Gambar ulang layar pengisian normal
       showDispensingScreen(targetMl);
@@ -920,29 +1198,30 @@ inline void updateDispensingAnimation(unsigned long dispensedMl, unsigned long t
   }
 
   // 2. Update Angka Volume jika bertambah
+  // 2. Update Angka Volume jika bertambah
   if (dispensedMl != lastMlShown) {
     lastMlShown = dispensedMl;
 
-    tft.fillRect(18, 94, 142, 24, WV_BG_LIGHT);
+    tft.fillRect(14, 90, 148, 22, WV_BG_LIGHT);
     tft.setTextColor(WV_TEXT_BLACK, WV_BG_LIGHT);
     tft.setTextSize(2);
-    tft.setCursor(18, 96);
+    tft.setCursor(14, 92);
     tft.printf("%lu mL", dispensedMl);
 
     if (!isDispensePaused) {
-      tft.fillRect(18, 136, 142, 24, WV_BG_LIGHT);
+      tft.fillRect(14, 128, 148, 22, WV_BG_LIGHT);
       tft.setTextColor(WV_SUCCESS_GREEN, WV_BG_LIGHT);
       tft.setTextSize(2);
-      tft.setCursor(18, 138);
+      tft.setCursor(14, 130);
       tft.printf("%.1f mL/s", pumpFlowRateMlPerSec);
     }
 
     // Progress Bar Horizontal
-    int targetW = (int)(pct * 208.0f);
+    int targetW = (int)(pct * 220.0f);
     if (targetW > lastBarWidth) {
-      int startX = 16 + max(0, lastBarWidth);
+      int startX = 10 + max(0, lastBarWidth);
       int drawW = targetW - max(0, lastBarWidth);
-      tft.fillRect(startX, 170, drawW, 16, WV_PRIMARY_BLUE);
+      tft.fillRect(startX, 156, drawW, 18, WV_PRIMARY_BLUE);
       lastBarWidth = targetW;
     }
   }
@@ -953,117 +1232,354 @@ inline void updateDispensingAnimation(unsigned long dispensedMl, unsigned long t
       lastAnimationTime = now;
       animationFrame = (animationFrame + 1) % 4;
 
-      // Bersihkan jalur tetesan air corong (Y: 76) ke dasar (Y: 154)
-      tft.fillRect(193, 76, 4, 76, WV_BG_LIGHT);
+      // Bersihkan jalur tetesan air corong (Y: 68) ke dasar wadah (Y: 142)
+      tft.fillRect(193, 68, 4, 74, WV_BG_LIGHT);
 
       // Tetesan air berurutan
-      int dropY1 = 80 + (animationFrame * 8);
-      int dropY2 = 110 + (animationFrame * 8);
+      int dropY1 = 72 + (animationFrame * 8);
+      int dropY2 = 102 + (animationFrame * 8);
       tft.fillCircle(195, dropY1, 2, WV_ACCENT_CYAN);
       tft.fillCircle(195, dropY2, 2, WV_ACCENT_CYAN);
 
       // Animasi ketinggian air wadah
-      int maxWaterH = 74;
+      int maxWaterH = 70;
       int curWaterH = (int)(pct * maxWaterH);
       if (curWaterH > 0) {
-        tft.fillRect(172, 154 - curWaterH, 46, curWaterH, WV_PRIMARY_BLUE);
-        tft.drawFastHLine(172, 154 - curWaterH, 46, WV_ACCENT_CYAN);
+        tft.fillRect(170, 142 - curWaterH, 50, curWaterH, WV_PRIMARY_BLUE);
+        tft.drawFastHLine(170, 142 - curWaterH, 50, WV_ACCENT_CYAN);
       }
     }
   }
 }
 
 // ==============================================================================
-// 6. TAMPILAN PENGISIAN SELESAI & UCAPAN TERIMA KASIH (AUTO RESET KE MENU)
+// 6. TAMPILAN PENGISIAN SELESAI & UCAPAN TERIMA KASIH (SMART RESET 5s/10s)
 // ==============================================================================
+static unsigned long s_lastCompleteCountdownSec = 9999;
+
 inline void showCompleteScreen(const char* status, unsigned long dispensedMl, const char* message) {
   currentScreen = SCREEN_COMPLETE;
   qrisStartTime = 0;
   isDispensing = false;
-  autoResetScreenTime = millis() + 5000; // Otomatis kembali ke menu setelah 5 detik
+  isDispensePaused = false;
+  isSwitchingBottle = false;
+  totalAccumulatedMl = 0;
+  holdButtonStartTime = 0;
+  s_lastCompleteCountdownSec = 9999;
+
+  completeScreenEnterTime = millis();
+  completeBottleWasRemoved = false;
+  completeScreenReminderBeeped = false;
+  autoResetScreenTime = completeScreenEnterTime + 10000; // Default 10 detik jika botol tertinggal di tatakan ("10")
+
   tft.fillScreen(WV_BG_LIGHT);
 
   if (strcmp(status, "COMPLETED") == 0) {
-    // Header Hijau Sukses
-    tft.fillRect(0, 0, DISP_WIDTH, 36, WV_SUCCESS_GREEN);
+    // 1. Header Hijau Sukses (Y: 0..34)
+    tft.fillRect(0, 0, DISP_WIDTH, 34, WV_SUCCESS_GREEN);
     tft.setTextColor(WV_TEXT_WHITE, WV_SUCCESS_GREEN);
     tft.setTextSize(2);
-    tft.setCursor(12, 10);
+    tft.setCursor(14, 8);
     tft.print("PENGISIAN SELESAI!");
 
-    // Kartu Ringkasan Putih
-    tft.fillRoundRect(8, 44, 224, 76, 6, WV_CARD_BG);
-    tft.drawRoundRect(8, 44, 224, 76, 6, WV_CARD_BORDER);
+    // 2. Banner Callout Menonjol: AMBIL BOTOL ANDA (Y: 40..98)
+    tft.fillRoundRect(8, 40, 224, 58, 6, WV_HEADER_BG);
+    tft.drawRoundRect(8, 40, 224, 58, 6, WV_PRIMARY_BLUE);
+    tft.setTextColor(WV_TEXT_WHITE, WV_HEADER_BG);
+    tft.setTextSize(2);
+    tft.setCursor(20, 48);
+    tft.print("AMBIL BOTOL ANDA");
+    tft.setTextColor(WV_ACCENT_CYAN, WV_HEADER_BG);
+    tft.setTextSize(1);
+    tft.setCursor(22, 74);
+    tft.print("Silakan angkat wadah dari tatakan");
+
+    // 3. Kartu Struk Transaksi (Y: 104..188)
+    tft.fillRoundRect(8, 104, 224, 84, 6, WV_CARD_BG);
+    tft.drawRoundRect(8, 104, 224, 84, 6, WV_CARD_BORDER);
 
     tft.setTextColor(WV_TEXT_BLACK, WV_CARD_BG);
     tft.setTextSize(2);
-    tft.setCursor(18, 52);
+    tft.setCursor(18, 114);
     tft.printf("Total: %lu mL", dispensedMl);
+
+    tft.setTextColor(WV_SUCCESS_GREEN, WV_CARD_BG);
+    tft.setTextSize(1);
+    tft.setCursor(18, 140);
+    tft.print("Status Transaksi : BERHASIL");
 
     tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
     tft.setTextSize(1);
-    tft.setCursor(18, 78);
-    tft.printf("Debit Aliran: %.1f mL/detik", pumpFlowRateMlPerSec);
+    tft.setCursor(18, 156);
+    tft.printf("Debit Rata-rata  : %.1f mL/s", pumpFlowRateMlPerSec);
+    tft.setCursor(18, 170);
+    tft.print("Aliran air ditutup presisi");
 
-    tft.setTextColor(WV_SUCCESS_GREEN, WV_CARD_BG);
-    tft.setCursor(18, 96);
-    tft.print("Silakan ambil tumbler / botol Anda.");
-
-    // Kotak Ucapan Terima Kasih
-    tft.fillRoundRect(8, 130, 224, 68, 8, WV_FOOTER_BG);
-    tft.drawRoundRect(8, 130, 224, 68, 8, WV_PRIMARY_BLUE);
+    // 4. Box Ucapan Terima Kasih (Y: 194..254)
+    tft.fillRoundRect(8, 194, 224, 60, 6, WV_FOOTER_BG);
+    tft.drawRoundRect(8, 194, 224, 60, 6, WV_PRIMARY_BLUE);
 
     tft.setTextColor(WV_PRIMARY_BLUE, WV_FOOTER_BG);
     tft.setTextSize(2);
-    tft.setCursor(35, 144);
+    tft.setCursor(35, 204);
     tft.print("TERIMA KASIH!");
 
     tft.setTextColor(WV_TEXT_DARK, WV_FOOTER_BG);
     tft.setTextSize(1);
-    tft.setCursor(32, 172);
-    tft.print("Selamat Menikmati Air Segar");
-
-    tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
-    tft.setCursor(20, 216);
-    tft.print("Kembali ke menu dalam 5 detik...");
+    tft.setCursor(30, 230);
+    tft.print("Selamat menikmati air segar.");
   } else {
-    // Header Merah Peringatan / Batal
-    tft.fillRect(0, 0, DISP_WIDTH, 36, WV_DANGER_RED);
+    // Header Merah Peringatan / Batal (Y: 0..34)
+    tft.fillRect(0, 0, DISP_WIDTH, 34, WV_DANGER_RED);
     tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
     tft.setTextSize(2);
-    tft.setCursor(20, 10);
+    tft.setCursor(18, 8);
     tft.print("PENGISIAN BERHENTI");
 
+    // Banner Callout: AMBIL BOTOL ANDA
+    tft.fillRoundRect(8, 40, 224, 58, 6, WV_FOOTER_BG);
+    tft.drawRoundRect(8, 40, 224, 58, 6, WV_DANGER_RED);
+    tft.setTextColor(WV_DANGER_RED, WV_FOOTER_BG);
+    tft.setTextSize(2);
+    tft.setCursor(20, 48);
+    tft.print("AMBIL BOTOL ANDA");
+    tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+    tft.setTextSize(1);
+    tft.setCursor(22, 74);
+    tft.print("Silakan angkat botol dari tatakan");
+
     // Kartu Info
-    tft.fillRoundRect(8, 44, 224, 90, 6, WV_CARD_BG);
-    tft.drawRoundRect(8, 44, 224, 90, 6, WV_CARD_BORDER);
+    tft.fillRoundRect(8, 104, 224, 88, 6, WV_CARD_BG);
+    tft.drawRoundRect(8, 104, 224, 88, 6, WV_CARD_BORDER);
 
     tft.setTextColor(WV_TEXT_BLACK, WV_CARD_BG);
     tft.setTextSize(2);
-    tft.setCursor(18, 52);
+    tft.setCursor(18, 114);
     tft.printf("Terisi: %lu mL", dispensedMl);
 
     tft.setTextColor(WV_DANGER_RED, WV_CARD_BG);
     tft.setTextSize(1);
-    tft.setCursor(18, 80);
-    // Batasi string pesan jika terlalu panjang agar tidak merusak tata letak
+    tft.setCursor(18, 142);
     char safeMsg[36];
     snprintf(safeMsg, sizeof(safeMsg), "%.32s", (message && strlen(message) > 0) ? message : "Dibatalkan");
     tft.print(safeMsg);
 
     tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
-    tft.setCursor(18, 104);
-    tft.print("Pompa dimatikan seketika.");
+    tft.setCursor(18, 164);
+    tft.print("Pompa dimatikan seketika demi keamanan.");
 
-    tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
-    tft.setCursor(20, 200);
-    tft.print("Kembali ke menu dalam 5 detik...");
+    // Footer Box
+    tft.fillRoundRect(8, 198, 224, 56, 6, WV_FOOTER_BG);
+    tft.drawRoundRect(8, 198, 224, 56, 6, WV_CARD_BORDER);
+    tft.setTextColor(WV_TEXT_DARK, WV_FOOTER_BG);
+    tft.setTextSize(1);
+    tft.setCursor(22, 212);
+    tft.print("Sistem siap untuk transaksi berikutnya.");
+    tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+    tft.setCursor(22, 230);
+    tft.print("Pastikan tatakan selalu bersih.");
   }
 }
 
+inline void updateCompleteScreenUI() {
+  if (currentScreen != SCREEN_COMPLETE) return;
+
+  unsigned long now = millis();
+  unsigned long remainingSec = (now < autoResetScreenTime) ? ((autoResetScreenTime - now + 999) / 1000) : 0;
+
+  if (remainingSec != s_lastCompleteCountdownSec) {
+    s_lastCompleteCountdownSec = remainingSec;
+
+    // Bersihkan area strip countdown di bawah (Y: 264..318)
+    tft.fillRect(0, 264, DISP_WIDTH, DISP_HEIGHT - 264, WV_BG_LIGHT);
+    tft.setTextSize(1);
+
+    if (completeBottleWasRemoved) {
+      // Kasus: Botol sudah diangkat (Hitung mundur 5 detik - "5 detik aja")
+      tft.setTextColor(WV_SUCCESS_GREEN, WV_BG_LIGHT);
+      tft.setCursor(16, 274);
+      tft.printf("Botol terangkat. Menu dalam %lu dtk...", remainingSec);
+      tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
+      tft.setCursor(16, 292);
+      tft.print("Tatakan siap untuk pelanggan berikutnya");
+    } else {
+      // Kasus: Botol masih di tatakan (Hitung mundur 10 detik - "10")
+      tft.setTextColor(WV_DANGER_RED, WV_BG_LIGHT);
+      tft.setCursor(16, 274);
+      tft.printf("Ambil botol Anda! Menu dalam %lu dtk...", remainingSec);
+      tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
+      tft.setCursor(16, 292);
+      tft.print("Jangan sampai botol Anda tertinggal!");
+    }
+  }
+}
+
+// ==============================================================================
+// 7. TAMPILAN PENGISIAN GAGAL PERSISTEN (DENGAN TOMBOL 'COBA LAGI' & 'BATAL/LAPOR')
+// ==============================================================================
+inline void showFailedScreen(const char* orderId, unsigned long dispensedMl, unsigned long targetMl, long price, const char* reason, int retryLeft = 3) {
+  currentScreen = SCREEN_FAILED;
+  qrisStartTime = 0;
+  isDispensing = false;
+  tft.fillScreen(WV_BG_LIGHT);
+
+  // 1. Header Merah Peringatan Gagal
+  tft.fillRect(0, 0, DISP_WIDTH, 34, WV_DANGER_RED);
+  tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
+  tft.setTextSize(2);
+  tft.setCursor(18, 8);
+  tft.print("PENGISIAN GAGAL!");
+
+  // 2. Kartu Rincian Transaksi & Volume
+  tft.fillRoundRect(8, 38, 224, 110, 6, WV_CARD_BG);
+  tft.drawRoundRect(8, 38, 224, 110, 6, WV_CARD_BORDER);
+
+  // Aksen garis merah di tepi kiri kartu
+  tft.fillRoundRect(10, 42, 4, 102, 2, WV_DANGER_RED);
+
+  tft.setTextColor(WV_TEXT_BLACK, WV_CARD_BG);
+  tft.setTextSize(1);
+  tft.setCursor(18, 44);
+  tft.printf("Order ID : %.18s", (orderId && strlen(orderId) > 0) ? orderId : "OFFLINE-ORDER");
+
+  tft.setTextColor(WV_DANGER_RED, WV_CARD_BG);
+  tft.setCursor(18, 58);
+  tft.printf("Status   : %.22s", (reason && strlen(reason) > 0) ? reason : "Air Tidak Naik");
+
+  tft.setTextColor(WV_TEXT_BLACK, WV_CARD_BG);
+  tft.setTextSize(2);
+  tft.setCursor(18, 72);
+  tft.printf("Terisi: %lu mL", dispensedMl);
+
+  unsigned long remainingMl = (targetMl > dispensedMl) ? (targetMl - dispensedMl) : targetMl;
+  tft.setTextColor(WV_WARNING_AMBER, WV_CARD_BG);
+  tft.setTextSize(1);
+  tft.setCursor(18, 92);
+  tft.printf("Sisa Belum Terisi : %lu mL", remainingMl);
+
+  tft.setTextColor(WV_TEXT_PRICE, WV_CARD_BG);
+  tft.setCursor(18, 108);
+  tft.printf("Nominal Pembayaran : Rp %ld", price > 0 ? price : 6000L);
+
+  tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
+  tft.setCursor(18, 124);
+  tft.print("*Foto layar ini untuk bukti refund CS");
+
+  // 3. Kotak Panduan Solusi
+  tft.fillRoundRect(8, 154, 224, 46, 6, WV_FOOTER_BG);
+  tft.drawRoundRect(8, 154, 224, 46, 6, WV_PRIMARY_BLUE);
+  tft.setTextColor(WV_PRIMARY_BLUE, WV_FOOTER_BG);
+  tft.setTextSize(1);
+  tft.setCursor(16, 160);
+  tft.print("[ PANDUAN PELANGGAN ]");
+  tft.setTextColor(WV_TEXT_DARK, WV_FOOTER_BG);
+  tft.setCursor(16, 174);
+  if (retryLeft > 0) {
+    tft.printf("1. Tekan COBA LAGI (Sisa: %d kali)", retryLeft);
+  } else {
+    tft.print("1. Batas coba lagi habis!");
+  }
+  tft.setCursor(16, 186);
+  tft.print("2. Tekan LAPOR ADMIN untuk refund");
+
+  // 4. Tombol 1: COBA LAGI (Biru) jika masih ada kuota retry
+  if (retryLeft > 0) {
+    tft.fillRoundRect(8, 206, 224, 48, 6, WV_PRIMARY_BLUE);
+    tft.setTextColor(WV_TEXT_WHITE, WV_PRIMARY_BLUE);
+    tft.setTextSize(2);
+    tft.setCursor(25, 214);
+    tft.printf("[ > COBA LAGI (%d) ]", retryLeft);
+    tft.setTextSize(1);
+    tft.setCursor(20, 236);
+    tft.print("Lanjutkan sisa air tanpa bayar lagi");
+  } else {
+    tft.fillRoundRect(8, 206, 224, 48, 6, WV_FOOTER_BG);
+    tft.drawRoundRect(8, 206, 224, 48, 6, WV_CARD_BORDER);
+    tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
+    tft.setTextSize(2);
+    tft.setCursor(25, 214);
+    tft.print("[ COBA HABIS ]");
+    tft.setTextSize(1);
+    tft.setCursor(20, 236);
+    tft.print("Silakan tekan LAPOR ADMIN di bawah");
+  }
+
+  // 5. Tombol 2: BATAL & LAPOR ADMIN (Merah)
+  tft.fillRoundRect(8, 260, 224, 48, 6, WV_DANGER_RED);
+  tft.setTextColor(WV_TEXT_WHITE, WV_DANGER_RED);
+  tft.setTextSize(2);
+  tft.setCursor(18, 268);
+  tft.print("[ X  LAPOR ADMIN ]");
+  tft.setTextSize(1);
+  tft.setCursor(22, 290);
+  tft.print("Catat status GAGAL & klaim refund");
+}
+
+// ==============================================================================
+// 8. TAMPILAN LAPORAN KLAIM REFUND TERCATAT (SEMENTARA SEBELUM STANDBY)
+// ==============================================================================
+inline void showReportedClaimScreen(const char* orderId, long price) {
+  currentScreen = SCREEN_COMPLETE;
+  autoResetScreenTime = millis() + 8000; // Otomatis kembali ke menu setelah 8 detik
+  tft.fillScreen(WV_BG_LIGHT);
+
+  // Header Banner Biru Gelap
+  tft.fillRect(0, 0, DISP_WIDTH, 36, WV_HEADER_BG);
+  tft.setTextColor(WV_TEXT_WHITE, WV_HEADER_BG);
+  tft.setTextSize(2);
+  tft.setCursor(15, 10);
+  tft.print("LAPORAN TERCATAT");
+
+  // Kartu Bukti Laporan
+  tft.fillRoundRect(8, 46, 224, 130, 6, WV_CARD_BG);
+  tft.drawRoundRect(8, 46, 224, 130, 6, WV_CARD_BORDER);
+
+  tft.setTextColor(WV_DANGER_RED, WV_CARD_BG);
+  tft.setTextSize(1);
+  tft.setCursor(18, 56);
+  tft.print("[ STATUS: TRANSAKSI GAGAL ]");
+
+  tft.setTextColor(WV_TEXT_BLACK, WV_CARD_BG);
+  tft.setTextSize(1);
+  tft.setCursor(18, 76);
+  tft.printf("Order ID : %.20s", (orderId && strlen(orderId) > 0) ? orderId : "-");
+
+  tft.setTextColor(WV_TEXT_PRICE, WV_CARD_BG);
+  tft.setTextSize(2);
+  tft.setCursor(18, 96);
+  tft.printf("Rp %ld", price > 0 ? price : 6000L);
+
+  tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
+  tft.setTextSize(1);
+  tft.setCursor(18, 126);
+  tft.print("Telah dicatat di database server.");
+  tft.setCursor(18, 142);
+  tft.print("Silakan hubungi Admin / Kasir.");
+
+  // Footer Info Panduan Klaim
+  tft.fillRoundRect(8, 186, 224, 70, 6, WV_FOOTER_BG);
+  tft.drawRoundRect(8, 186, 224, 70, 6, WV_PRIMARY_BLUE);
+  tft.setTextColor(WV_PRIMARY_BLUE, WV_FOOTER_BG);
+  tft.setTextSize(1);
+  tft.setCursor(18, 196);
+  tft.print("[ KLAIM PENGEMBALIAN DANA ]");
+  tft.setTextColor(WV_TEXT_DARK, WV_FOOTER_BG);
+  tft.setCursor(18, 214);
+  tft.print("Tunjukkan bukti Order ID di atas");
+  tft.setCursor(18, 228);
+  tft.print("ke petugas untuk pengembalian.");
+
+  tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
+  tft.setCursor(22, 280);
+  tft.print("Kembali ke menu dalam 8 detik...");
+}
+
 inline void checkAutoResetScreen() {
-  if (currentScreen == SCREEN_COMPLETE && millis() >= autoResetScreenTime) {
-    showStandbyScreen();
+  if (currentScreen == SCREEN_COMPLETE) {
+    updateCompleteScreenUI();
+    if (millis() >= autoResetScreenTime) {
+      showStandbyScreen();
+    }
   }
 }
 

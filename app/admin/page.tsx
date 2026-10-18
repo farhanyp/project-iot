@@ -143,6 +143,9 @@ export default function AdminDashboardPage() {
         return "bg-blue-50 text-blue-700 border-blue-300";
       case "PENDING":
         return "bg-amber-50 text-amber-700 border-amber-300";
+      case "FAILED":
+      case "FAILED_AIR_HABIS":
+        return "bg-red-50 text-red-700 border-red-300 font-bold";
       default:
         return "bg-slate-100 text-slate-600 border-slate-300";
     }

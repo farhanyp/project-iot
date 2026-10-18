@@ -9,23 +9,8 @@ export interface TelemetryData {
   dispensedMl: number;
   targetMl: number;
   pulseCount?: number;
-  weightGrams?: number;
-  grossWeight?: number;
-  maxWeightLimit?: number;
-  currentWeight?: number;
-  calFactor?: number;
-  containerWeight?: number;
-  tareLog?: string;
-  scaleLog?: string;
-  scaleStatus?: "CONNECTED" | "DISCONNECTED";
-  scaleRaw?: number;
-  cutOffMode?: "WEIGHT_LOADCELL" | "TIME_FALLBACK" | string;
-  isScaleReady?: boolean;
-  status: "READY" | "DISPENSING" | "OFFLINE" | "COMPLETED" | "STOPPED_OVERWEIGHT" | "TIMEOUT_CUTOFF";
+  status: "READY" | "DISPENSING" | "OFFLINE" | "COMPLETED" | "TIMEOUT_CUTOFF";
   transactionId?: string;
-  cutoffOffset?: number;
-  safetyBias?: number;
-  effectiveTarget?: number;
   isTumblerPresent?: boolean;
   buzzerAlarmEnabled?: boolean;
   isBuzzerSounding?: boolean;
@@ -48,11 +33,6 @@ export interface CommandOptions {
   flowRate?: number;
   targetMl?: number;
   measuredMl?: number;
-  knownWeight?: number;
-  factor?: number;
-  maxWeight?: number;
-  offset?: number;
-  bias?: number;
   deviceId?: string;
   enabled?: boolean;
   targetDistanceCm?: number;
@@ -71,11 +51,6 @@ export function useIoTSocket(customWsUrl?: string) {
     flowRateMlPerSec: 25.0,
     dispensedMl: 0,
     targetMl: 0,
-    currentWeight: 0,
-    weightGrams: 0,
-    maxWeightLimit: 2500,
-    isScaleReady: false,
-    scaleStatus: "DISCONNECTED",
     status: "OFFLINE",
   });
   const [events, setEvents] = useState<IoTEvent[]>([]);
@@ -140,9 +115,6 @@ export function useIoTSocket(customWsUrl?: string) {
                 ...prev,
                 status: payload.deviceStatus,
                 ...(payload.telemetry || {}),
-                isScaleReady: payload.telemetry?.isScaleReady !== undefined 
-                  ? !!payload.telemetry.isScaleReady 
-                  : prev.isScaleReady,
               }));
             }
           } else if (payload.type === "MQTT_EVENT") {
@@ -150,38 +122,28 @@ export function useIoTSocket(customWsUrl?: string) {
 
             const { eventType, data } = payload;
             if (eventType === "status") {
-              const statusVal = data.status === "OFFLINE" ? "OFFLINE" : data.status || "READY";
-              setDeviceStatus(statusVal);
+              const statusVal = data?.status === "OFFLINE" ? "OFFLINE" : (data?.status as TelemetryData["status"]) || "READY";
+              setDeviceStatus(statusVal === "DISPENSING" ? "DISPENSING" : statusVal === "OFFLINE" ? "OFFLINE" : "READY");
               setTelemetry((prev) => ({
                 ...prev,
                 status: statusVal,
-                calFactor: data.calFactor !== undefined ? data.calFactor : prev.calFactor,
-                isScaleReady: data.isScaleReady !== undefined ? !!data.isScaleReady : prev.isScaleReady,
-                scaleStatus: data.scaleStatus !== undefined ? data.scaleStatus : (data.isScaleReady ? "CONNECTED" : "DISCONNECTED"),
-                scaleLog: data.scaleLog !== undefined ? data.scaleLog : prev.scaleLog,
-                scaleRaw: data.scaleRaw !== undefined ? data.scaleRaw : prev.scaleRaw,
-                maxWeightLimit: data.maxWeightLimit !== undefined ? data.maxWeightLimit : prev.maxWeightLimit,
-                currentWeight: data.currentWeight !== undefined ? data.currentWeight : prev.currentWeight,
               }));
             } else if (eventType === "telemetry") {
-              if (data.status === "DISPENSING") {
+              if (data?.status === "DISPENSING") {
                 setDeviceStatus("DISPENSING");
-              } else if (data.status === "READY") {
+              } else if (data?.status === "READY") {
                 setDeviceStatus("READY");
               }
               setTelemetry((prev) => ({
                 ...prev,
-                ...data,
-                isScaleReady: data.isScaleReady !== undefined ? !!data.isScaleReady : prev.isScaleReady,
+                ...(data as Partial<TelemetryData>),
               }));
             } else if (eventType === "complete") {
               setDeviceStatus("READY");
               setTelemetry((prev) => ({
                 ...prev,
-                dispensedMl: data.dispensedMl || prev.dispensedMl,
-                weightGrams: data.weightGrams || prev.weightGrams,
-                grossWeight: data.grossWeight || prev.grossWeight,
-                status: data.status || "COMPLETED",
+                dispensedMl: typeof data?.dispensedMl === "number" ? data.dispensedMl : prev.dispensedMl,
+                status: (data?.status as TelemetryData["status"]) || "COMPLETED",
               }));
             }
           }
@@ -251,9 +213,6 @@ export function useIoTSocket(customWsUrl?: string) {
       fallbackDeviceId = "DISPENSER-01"
     ) => {
       let volumeMl = 600;
-      let knownWeight: number | undefined;
-      let factor: number | undefined;
-      let maxWeight: number | undefined;
       let deviceId = fallbackDeviceId;
       let extraOptions: Record<string, unknown> = {};
 
@@ -262,9 +221,6 @@ export function useIoTSocket(customWsUrl?: string) {
       } else if (optionsOrVolume && typeof optionsOrVolume === "object") {
         extraOptions = { ...optionsOrVolume };
         if (optionsOrVolume.volumeMl !== undefined) volumeMl = optionsOrVolume.volumeMl;
-        if (optionsOrVolume.knownWeight !== undefined) knownWeight = optionsOrVolume.knownWeight;
-        if (optionsOrVolume.factor !== undefined) factor = optionsOrVolume.factor;
-        if (optionsOrVolume.maxWeight !== undefined) maxWeight = optionsOrVolume.maxWeight;
         if (optionsOrVolume.deviceId !== undefined) deviceId = optionsOrVolume.deviceId;
       }
 
@@ -274,9 +230,6 @@ export function useIoTSocket(customWsUrl?: string) {
         deviceId,
         action,
         volumeMl,
-        knownWeight,
-        factor,
-        maxWeight,
       });
 
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -300,52 +253,18 @@ export function useIoTSocket(customWsUrl?: string) {
     []
   );
 
-  // Helper function untuk Tare timbangan manual
-  const sendTare = useCallback(
-    (deviceId = "DISPENSER-01") => {
-      return sendCommand("TARE", { deviceId });
-    },
-    [sendCommand]
-  );
-
-  // Helper function untuk Reset sesi pengisian dan timbangan
+  // Helper function untuk Reset sesi pengisian
   const sendReset = useCallback(
     (deviceId = "DISPENSER-01") => {
       setDeviceStatus("READY");
       setTelemetry((prev) => ({
         ...prev,
         dispensedMl: 0,
-        weightGrams: 0,
         targetMl: 0,
         flowRate: 0,
         status: "READY",
-        tareLog: "Timbangan & sesi pengisian telah di-reset ke 0.",
       }));
       return sendCommand("RESET", { deviceId });
-    },
-    [sendCommand]
-  );
-
-  // Helper function untuk Kalibrasi dengan bobot acuan
-  const sendCalibrate = useCallback(
-    (knownWeight: number, deviceId = "DISPENSER-01") => {
-      return sendCommand("CALIBRATE", { knownWeight, deviceId });
-    },
-    [sendCommand]
-  );
-
-  // Helper function untuk menetapkan faktor kalibrasi secara eksplisit
-  const sendSetCalFactor = useCallback(
-    (factor: number, deviceId = "DISPENSER-01") => {
-      return sendCommand("SET_CAL_FACTOR", { factor, deviceId });
-    },
-    [sendCommand]
-  );
-
-  // Helper function untuk menetapkan batas beban maksimal keamanan (gram)
-  const sendSetMaxWeight = useCallback(
-    (maxWeight: number, deviceId = "DISPENSER-01") => {
-      return sendCommand("SET_MAX_WEIGHT", { maxWeight, deviceId });
     },
     [sendCommand]
   );
@@ -413,24 +332,6 @@ export function useIoTSocket(customWsUrl?: string) {
     [sendCommand]
   );
 
-  // Helper function untuk Early Cut-off Offset (g)
-  const sendSetOffset = useCallback(
-    (offset: number, deviceId = "DISPENSER-01") => {
-      setTelemetry((prev) => ({ ...prev, cutoffOffset: offset }));
-      return sendCommand("SET_OFFSET", { offset, deviceId });
-    },
-    [sendCommand]
-  );
-
-  // Helper function untuk Safety Margin Bias (g)
-  const sendSetBias = useCallback(
-    (bias: number, deviceId = "DISPENSER-01") => {
-      setTelemetry((prev) => ({ ...prev, safetyBias: bias }));
-      return sendCommand("SET_BIAS", { bias, deviceId });
-    },
-    [sendCommand]
-  );
-
   return {
     isConnected,
     mqttConnected,
@@ -438,11 +339,7 @@ export function useIoTSocket(customWsUrl?: string) {
     telemetry,
     events,
     sendCommand,
-    sendTare,
     sendReset,
-    sendCalibrate,
-    sendSetCalFactor,
-    sendSetMaxWeight,
     sendSetBuzzerAlarm,
     sendResetSensor,
     sendSetProximityConfig,
@@ -450,7 +347,5 @@ export function useIoTSocket(customWsUrl?: string) {
     sendSetFlowRate,
     sendCalibratePump,
     sendResetWiFi,
-    sendSetOffset,
-    sendSetBias,
   };
 }
