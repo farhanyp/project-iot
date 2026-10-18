@@ -67,12 +67,17 @@ inline void parsePackagesFromJson(const String& json) {
     String nameVal = extractJsonValue(itemJson, "name");
     String volVal = extractJsonValue(itemJson, "volumeMl");
     String priceVal = extractJsonValue(itemJson, "price");
+    String codeVal = extractJsonValue(itemJson, "code");
     String idVal = extractJsonValue(itemJson, "id");
     if (idVal.length() == 0) idVal = String(count + 1);
+    if (codeVal.length() == 0) codeVal = String("PKG_") + volVal;
 
     if (nameVal.length() > 0 && volVal.length() > 0 && priceVal.length() > 0) {
       strncpy(dispenserPackages[count].id, idVal.c_str(), sizeof(dispenserPackages[count].id) - 1);
       dispenserPackages[count].id[sizeof(dispenserPackages[count].id) - 1] = '\0';
+
+      strncpy(dispenserPackages[count].code, codeVal.c_str(), sizeof(dispenserPackages[count].code) - 1);
+      dispenserPackages[count].code[sizeof(dispenserPackages[count].code) - 1] = '\0';
 
       strncpy(dispenserPackages[count].name, nameVal.c_str(), sizeof(dispenserPackages[count].name) - 1);
       dispenserPackages[count].name[sizeof(dispenserPackages[count].name) - 1] = '\0';
@@ -80,8 +85,9 @@ inline void parsePackagesFromJson(const String& json) {
       dispenserPackages[count].volumeMl = volVal.toInt();
       dispenserPackages[count].price = priceVal.toInt();
 
-      Serial.printf("[PACKAGES] Paket %d dimuat: %s | %d mL | Rp %ld\n",
-                    count + 1, dispenserPackages[count].name, dispenserPackages[count].volumeMl, dispenserPackages[count].price);
+      Serial.printf("[PACKAGES] Paket %d dimuat: %s (%s) | %d mL | Rp %ld\n",
+                    count + 1, dispenserPackages[count].name, dispenserPackages[count].code,
+                    dispenserPackages[count].volumeMl, dispenserPackages[count].price);
       count++;
     }
 
@@ -92,6 +98,20 @@ inline void parsePackagesFromJson(const String& json) {
     totalPackages = count;
     Serial.printf("[PACKAGES] Total %d paket menu berhasil disinkronisasi dari database web!\n", totalPackages);
     
+    // Simpan permanen ke Flash Memory NVS
+    preferences.begin("wv_pkg", false);
+    preferences.putInt("count", totalPackages);
+    for (int i = 0; i < totalPackages; i++) {
+      String pfx = "p" + String(i) + "_";
+      preferences.putString((pfx + "id").c_str(), dispenserPackages[i].id);
+      preferences.putString((pfx + "code").c_str(), dispenserPackages[i].code);
+      preferences.putString((pfx + "name").c_str(), dispenserPackages[i].name);
+      preferences.putInt((pfx + "vol").c_str(), dispenserPackages[i].volumeMl);
+      preferences.putLong((pfx + "prc").c_str(), dispenserPackages[i].price);
+    }
+    preferences.end();
+    Serial.printf("[NVS] %d paket berhasil disimpan permanen ke Flash Memory NVS!\n", totalPackages);
+
     // Kirim notifikasi ke UI Task (Core 1)
     NetToUIMessage netMsg;
     memset(&netMsg, 0, sizeof(netMsg));
@@ -100,6 +120,41 @@ inline void parsePackagesFromJson(const String& json) {
       xQueueSend(qNetToUI, &netMsg, 0);
     }
   }
+}
+
+// Memuat paket menu yang tersimpan dari NVS saat boot awal
+inline void loadPackagesFromNVS() {
+  preferences.begin("wv_pkg", true);
+  int count = preferences.getInt("count", 0);
+  if (count > 0 && count <= MAX_PACKAGES) {
+    for (int i = 0; i < count; i++) {
+      String pfx = "p" + String(i) + "_";
+      String idVal = preferences.getString((pfx + "id").c_str(), "");
+      String codeVal = preferences.getString((pfx + "code").c_str(), "");
+      String nameVal = preferences.getString((pfx + "name").c_str(), "");
+      int volVal = preferences.getInt((pfx + "vol").c_str(), 0);
+      long prcVal = preferences.getLong((pfx + "prc").c_str(), 0);
+
+      if (nameVal.length() > 0 && volVal > 0) {
+        strncpy(dispenserPackages[i].id, idVal.c_str(), sizeof(dispenserPackages[i].id) - 1);
+        dispenserPackages[i].id[sizeof(dispenserPackages[i].id) - 1] = '\0';
+
+        strncpy(dispenserPackages[i].code, codeVal.c_str(), sizeof(dispenserPackages[i].code) - 1);
+        dispenserPackages[i].code[sizeof(dispenserPackages[i].code) - 1] = '\0';
+
+        strncpy(dispenserPackages[i].name, nameVal.c_str(), sizeof(dispenserPackages[i].name) - 1);
+        dispenserPackages[i].name[sizeof(dispenserPackages[i].name) - 1] = '\0';
+
+        dispenserPackages[i].volumeMl = volVal;
+        dispenserPackages[i].price = prcVal;
+      }
+    }
+    totalPackages = count;
+    Serial.printf("[NVS] Berhasil memuat %d paket menu dari Flash Memory NVS!\n", totalPackages);
+  } else {
+    Serial.println("[NVS] Belum ada paket tersimpan di NVS. Menggunakan paket bawaan default.");
+  }
+  preferences.end();
 }
 
 
@@ -429,6 +484,36 @@ inline void mqttCallback(char* topic, byte* message, unsigned int length) {
     beepPattern(3);
     resetWiFiSettings();
   }
+
+  // Perintah 17: SET_OFFSET (Atur Early Cut-off Offset dari Web)
+  else if (action == "SET_OFFSET" || action == "SET_CUTOFF_OFFSET") {
+    String offStr = extractJsonValue(messageStr, "offset");
+    if (offStr.length() == 0) offStr = extractJsonValue(messageStr, "value");
+    float off = (offStr.length() > 0) ? offStr.toFloat() : 15.0f;
+    Serial.printf("[MQTT Core 0] Menerima perintah SET_OFFSET dari Web (Offset: %.1f g)\n", off);
+    NetToUIMessage netMsg;
+    memset(&netMsg, 0, sizeof(netMsg));
+    netMsg.type = NET_MSG_CMD_SET_OFFSET;
+    netMsg.floatVal = off;
+    if (qNetToUI != NULL) {
+      xQueueSend(qNetToUI, &netMsg, 0);
+    }
+  }
+
+  // Perintah 18: SET_BIAS (Atur Safety Margin Bias dari Web)
+  else if (action == "SET_BIAS" || action == "SET_SAFETY_BIAS") {
+    String biasStr = extractJsonValue(messageStr, "bias");
+    if (biasStr.length() == 0) biasStr = extractJsonValue(messageStr, "value");
+    float bias = (biasStr.length() > 0) ? biasStr.toFloat() : 1.0f;
+    Serial.printf("[MQTT Core 0] Menerima perintah SET_BIAS dari Web (Bias: %.1f g)\n", bias);
+    NetToUIMessage netMsg;
+    memset(&netMsg, 0, sizeof(netMsg));
+    netMsg.type = NET_MSG_CMD_SET_BIAS;
+    netMsg.floatVal = bias;
+    if (qNetToUI != NULL) {
+      xQueueSend(qNetToUI, &netMsg, 0);
+    }
+  }
 }
 
 // Menghubungkan ulang ke Broker MQTT secara NON-BLOCKING pada Core 0
@@ -458,7 +543,8 @@ inline void handleMQTTConnection() {
     mqttClient.subscribe(topicCommand.c_str());
     mqttClient.subscribe(topicQr.c_str());
     mqttClient.subscribe(topicPackages.c_str());
-    Serial.println("[MQTT Core 0] Berlangganan ke topik command, qr, dan packages!");
+    mqttClient.subscribe("water/dispenser/broadcast/packages");
+    Serial.println("[MQTT Core 0] Berlangganan ke topik command, qr, packages, dan broadcast!");
   } else {
     Serial.printf("[MQTT Core 0] Gagal terhubung (rc=%d). Akan dicoba lagi di background.\n", mqttClient.state());
   }
@@ -507,8 +593,11 @@ inline void processOutgoingUIMessages() {
                        String(",\"isTumblerPresent\":") + (isTumblerPresent ? "true" : "false") + 
                        String(",\"buzzerAlarmEnabled\":") + (isBuzzerAlarmEnabled ? "true" : "false") + 
                        String(",\"isBuzzerSounding\":") + (isBuzzerSounding ? "true" : "false") + 
-                       String(",\"targetDistanceCm\":") + String(targetDistanceCm, 1) + 
-                       String(",\"currentDistanceCm\":") + String(currentMeasuredDistanceCm, 1) + "}";
+                        String(",\"targetDistanceCm\":") + String(targetDistanceCm, 1) + 
+                        String(",\"currentDistanceCm\":") + String(currentMeasuredDistanceCm, 1) + 
+                        String(",\"cutoffOffset\":") + String(dispenseEarlyOffsetGrams, 1) + 
+                        String(",\"safetyBias\":") + String(targetSafetyBiasGrams, 1) + 
+                        String(",\"effectiveTarget\":") + String(max(0.0f, (float)uiMsg.targetMl - targetSafetyBiasGrams), 1) + "}";
       mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
     }
     else if (uiMsg.type == UI_MSG_COMPLETE) {
@@ -541,7 +630,10 @@ inline void processOutgoingUIMessages() {
                        String(",\"buzzerAlarmEnabled\":") + (isBuzzerAlarmEnabled ? "true" : "false") + 
                        String(",\"isBuzzerSounding\":") + (isBuzzerSounding ? "true" : "false") + 
                        String(",\"targetDistanceCm\":") + String(targetDistanceCm, 1) + 
-                       String(",\"currentDistanceCm\":") + String(currentMeasuredDistanceCm, 1) + "}";
+                       String(",\"currentDistanceCm\":") + String(currentMeasuredDistanceCm, 1) + 
+                       String(",\"cutoffOffset\":") + String(dispenseEarlyOffsetGrams, 1) + 
+                       String(",\"safetyBias\":") + String(targetSafetyBiasGrams, 1) + 
+                       String(",\"effectiveTarget\":") + String(max(0.0f, (float)targetMilliLitres - targetSafetyBiasGrams), 1) + "}";
       mqttClient.publish(topicTelemetry.c_str(), payload.c_str());
     }
   }

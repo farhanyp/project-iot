@@ -93,6 +93,26 @@ mqttClient.on("message", async (topic, message) => {
     lastDeviceCode = deviceCode;
     if (eventType === "status") {
       cachedDeviceStatus = payload.status === "OFFLINE" ? "OFFLINE" : (payload.status || "READY");
+
+      if (payload.status === "READY") {
+        // Auto-push paket menu air terbaru ke dispenser yang baru online
+        prisma.packagePreset.findMany({
+          where: { isActive: true },
+          orderBy: { volumeMl: "asc" },
+          select: { id: true, name: true, volumeMl: true, price: true, code: true },
+        }).then((packages) => {
+          if (packages && packages.length > 0) {
+            mqttClient.publish(
+              `water/dispenser/${deviceCode}/packages`,
+              JSON.stringify({ packages })
+            );
+            console.log(`[MQTT BRIDGE] Otomatis menyinkronkan ${packages.length} paket ke ${deviceCode} (Status: READY)`);
+          }
+        }).catch((err) => {
+          console.warn("[MQTT BRIDGE] Gagal auto-push paket:", err);
+        });
+      }
+
       if (payload.calFactor !== undefined || payload.isScaleReady !== undefined) {
         cachedTelemetry = {
           ...(cachedTelemetry || {}),

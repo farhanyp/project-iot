@@ -92,7 +92,9 @@ enum NetToUIMsgType {
   NET_MSG_CMD_CALIBRATE,
   NET_MSG_CMD_SET_CAL_FACTOR,
   NET_MSG_CMD_SET_MAX_WEIGHT,
-  NET_MSG_CMD_RESET_WIFI
+  NET_MSG_CMD_RESET_WIFI,
+  NET_MSG_CMD_SET_OFFSET,
+  NET_MSG_CMD_SET_BIAS
 };
 
 struct NetToUIMessage {
@@ -248,3 +250,10 @@ extern float lastTareCandidateWeight;
 extern unsigned long pauseStartTime;
 extern unsigned long dryRunCheckStartTime;
 extern float dryRunInitialWeight;
+
+// Variabel Early Cut-Off Offset & Adaptive Self-Tuning (Target 199g +- 1g)
+extern float dispenseEarlyOffsetGrams;
+extern float targetSafetyBiasGrams;
+extern unsigned long pumpStopTime;
+extern bool isWaitingForSettle;
+

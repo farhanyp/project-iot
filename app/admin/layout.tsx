@@ -27,6 +27,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const navLinks = [
     { label: "Dashboard", href: "/admin" },
     { label: "Manajemen Perangkat", href: "/admin/devices" },
+    { label: "Paket Menu Air", href: "/admin/packages" },
     { label: "Uji Sensor & Buzzer", href: "/admin/sensor-test" },
     { label: "Log Aktivitas", href: "/admin/logs" },
   ];

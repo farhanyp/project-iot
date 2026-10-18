@@ -43,6 +43,8 @@ export default function Home() {
     sendCalibrate,
     sendSetCalFactor,
     sendSetMaxWeight,
+    sendSetOffset,
+    sendSetBias,
   } = useIoTSocket();
 
   // Daftar paket dinamis dari database (fallback ke DEFAULT_PACKAGES)
@@ -52,6 +54,8 @@ export default function Home() {
   const [knownWeight, setKnownWeight] = useState<string>("200");
   const [calFactorInput, setCalFactorInput] = useState<string>("-420.0");
   const [maxWeightLimitInput, setMaxWeightLimitInput] = useState<string>("2500");
+  const [offsetInput, setOffsetInput] = useState<string>("15.0");
+  const [biasInput, setBiasInput] = useState<string>("1.0");
   const [feedback, setFeedback] = useState<string | null>(null);
   const [dismissAlert, setDismissAlert] = useState<boolean>(false);
 
@@ -85,6 +89,18 @@ export default function Home() {
   if (telemetry.maxWeightLimit !== undefined && telemetry.maxWeightLimit !== prevLimit) {
     setPrevLimit(telemetry.maxWeightLimit);
     setMaxWeightLimitInput(String(telemetry.maxWeightLimit));
+  }
+
+  const [prevOffset, setPrevOffset] = useState(telemetry.cutoffOffset);
+  if (telemetry.cutoffOffset !== undefined && telemetry.cutoffOffset !== prevOffset) {
+    setPrevOffset(telemetry.cutoffOffset);
+    setOffsetInput(String(telemetry.cutoffOffset));
+  }
+
+  const [prevBias, setPrevBias] = useState(telemetry.safetyBias);
+  if (telemetry.safetyBias !== undefined && telemetry.safetyBias !== prevBias) {
+    setPrevBias(telemetry.safetyBias);
+    setBiasInput(String(telemetry.safetyBias));
   }
 
   const [prevStatus, setPrevStatus] = useState(deviceStatus);
@@ -245,6 +261,20 @@ export default function Home() {
     if (!val || val <= 100) return showFeedback("Batas beban tidak valid.");
     sendSetMaxWeight(val, "DISPENSER-01");
     showFeedback(`Batas ${val}g disimpan.`);
+  };
+
+  const handleSaveOffset = () => {
+    const val = parseFloat(offsetInput);
+    if (isNaN(val) || val < 0 || val > 50) return showFeedback("Offset harus antara 0 - 50 gram.");
+    sendSetOffset(val, "DISPENSER-01");
+    showFeedback(`Early Cut-off Offset ${val}g disimpan ke Flash.`);
+  };
+
+  const handleSaveBias = () => {
+    const val = parseFloat(biasInput);
+    if (isNaN(val) || val < 0 || val > 20) return showFeedback("Safety bias harus antara 0 - 20 gram.");
+    sendSetBias(val, "DISPENSER-01");
+    showFeedback(`Safety bias ${val}g disimpan ke Flash (Target: ${200 - val}g).`);
   };
 
   return (
@@ -475,6 +505,18 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Info Status Target Efektif & Early Cut-off */}
+          <div className="bg-blue-50/70 border border-blue-200 rounded-lg p-2.5 text-xs text-blue-900 flex flex-wrap items-center justify-between gap-2 font-mono">
+            <div>
+              Target Efektif: <strong>{telemetry.effectiveTarget !== undefined ? `${telemetry.effectiveTarget}g` : `${(selectedVolume || 200) - parseFloat(biasInput || "1.0")}g`}</strong>
+              <span className="text-blue-600 text-[11px] ml-1">(Bias -{biasInput}g)</span>
+            </div>
+            <div>
+              Trigger Cut-off: <strong>{((telemetry.effectiveTarget !== undefined ? telemetry.effectiveTarget : (selectedVolume || 200) - parseFloat(biasInput || "1.0")) - parseFloat(offsetInput || "15.0")).toFixed(1)}g</strong>
+              <span className="text-blue-600 text-[11px] ml-1">(Offset -{offsetInput}g)</span>
+            </div>
+          </div>
+
           {/* Feedback Banner */}
           {feedback && (
             <div className="p-3 bg-slate-100 border border-slate-300 rounded-lg text-sm text-slate-800 font-mono font-medium">
@@ -637,7 +679,7 @@ export default function Home() {
         <summary className="font-semibold cursor-pointer text-slate-900 text-base select-none">
           Pengaturan Kalibrasi & Batas Beban Flash ESP32
         </summary>
-        <div className="pt-4 grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-slate-100 mt-3">
+        <div className="pt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 border-t border-slate-100 mt-3">
           <div className="space-y-1.5">
             <label htmlFor="known-weight" className="text-slate-700 font-medium block">1. Kalibrasi Beban (g):</label>
             <div className="flex gap-2">
@@ -659,6 +701,22 @@ export default function Home() {
             <div className="flex gap-2">
               <input id="max-weight" type="number" step="50" value={maxWeightLimitInput} onChange={(e) => setMaxWeightLimitInput(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-1.5 font-mono text-base" />
               <button type="button" onClick={handleSaveMax} className="px-3.5 py-1.5 bg-slate-800 text-white font-medium rounded-lg shrink-0 hover:bg-slate-700 cursor-pointer">Simpan</button>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="offset-input" className="text-slate-700 font-medium block">4. Early Cut-off Offset (g):</label>
+            <div className="flex gap-2">
+              <input id="offset-input" type="number" step="0.5" value={offsetInput} onChange={(e) => setOffsetInput(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-1.5 font-mono text-base" />
+              <button type="button" onClick={handleSaveOffset} className="px-3.5 py-1.5 bg-blue-700 text-white font-medium rounded-lg shrink-0 hover:bg-blue-600 cursor-pointer">Simpan</button>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="bias-input" className="text-slate-700 font-medium block">5. Safety Margin Bias (g):</label>
+            <div className="flex gap-2">
+              <input id="bias-input" type="number" step="0.5" value={biasInput} onChange={(e) => setBiasInput(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-1.5 font-mono text-base" />
+              <button type="button" onClick={handleSaveBias} className="px-3.5 py-1.5 bg-blue-700 text-white font-medium rounded-lg shrink-0 hover:bg-blue-600 cursor-pointer">Simpan</button>
             </div>
           </div>
         </div>

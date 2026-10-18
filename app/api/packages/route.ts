@@ -3,27 +3,46 @@ import { prisma } from "@/lib/prisma";
 import { publishMqttMessage } from "@/lib/mqtt-sender";
 
 // Helper broadcast daftar paket aktif ke semua ESP32 Dispenser via MQTT
-async function broadcastPackagesToDispensers() {
+export async function broadcastPackagesToDispensers() {
   try {
     const packages = await prisma.packagePreset.findMany({
       where: { isActive: true },
       orderBy: { volumeMl: "asc" },
       select: { id: true, name: true, volumeMl: true, price: true, code: true },
     });
-    await publishMqttMessage(
-      "water/dispenser/+/packages",
-      JSON.stringify({ packages })
-    );
+
+    const payload = JSON.stringify({ packages });
+
+    // 1. Broadcast ke topik umum dan fallback DISPENSER-01
+    await publishMqttMessage("water/dispenser/broadcast/packages", payload);
+    await publishMqttMessage("water/dispenser/DISPENSER-01/packages", payload);
+
+    // 2. Broadcast ke seluruh perangkat aktif di database
+    const devices = await prisma.device.findMany({
+      select: { code: true },
+    });
+    for (const dev of devices) {
+      if (dev.code !== "DISPENSER-01") {
+        await publishMqttMessage(`water/dispenser/${dev.code}/packages`, payload);
+      }
+    }
+
+    console.log(`[MQTT BROADCAST] ${packages.length} paket berhasil disinkronisasi ke ESP32.`);
+    return { success: true, count: packages.length };
   } catch (err) {
     console.warn("[BROADCAST PACKAGES ERROR]:", err);
+    return { success: false, error: err };
   }
 }
 
-// 1. GET: Ambil daftar paket aktif
-export async function GET() {
+// 1. GET: Ambil daftar paket (all=true untuk admin, default: hanya aktif)
+export async function GET(req: NextRequest) {
   try {
+    const { searchParams } = new URL(req.url);
+    const all = searchParams.get("all") === "true";
+
     const packages = await prisma.packagePreset.findMany({
-      where: { isActive: true },
+      where: all ? undefined : { isActive: true },
       orderBy: { volumeMl: "asc" },
     });
     return NextResponse.json({ success: true, packages });
@@ -76,7 +95,7 @@ export async function POST(req: NextRequest) {
 // 3. PUT: Update paket yang ada di database dan broadcast ke ESP32
 export async function PUT(req: NextRequest) {
   try {
-    const { id, name, volumeMl, price, isActive } = await req.json();
+    const { id, name, volumeMl, price, isActive, code } = await req.json();
 
     if (!id) {
       return NextResponse.json({ success: false, error: "ID paket diperlukan." }, { status: 400 });
@@ -86,6 +105,7 @@ export async function PUT(req: NextRequest) {
       where: { id },
       data: {
         ...(name !== undefined && { name }),
+        ...(code !== undefined && { code }),
         ...(volumeMl !== undefined && { volumeMl: parseInt(volumeMl, 10) }),
         ...(price !== undefined && { price: parseFloat(price) }),
         ...(isActive !== undefined && { isActive }),
@@ -104,7 +124,7 @@ export async function PUT(req: NextRequest) {
   }
 }
 
-// 4. DELETE: Hapus atau nonaktifkan paket dan sync ke ESP32
+// 4. DELETE: Hapus paket (soft-delete jika ada transaksi, hard-delete jika belum ada) dan sync ke ESP32
 export async function DELETE(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -114,14 +134,24 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ success: false, error: "ID paket diperlukan." }, { status: 400 });
     }
 
-    await prisma.packagePreset.update({
-      where: { id },
-      data: { isActive: false },
-    });
+    const txCount = await prisma.transaction.count({ where: { packagePresetId: id } });
+    if (txCount > 0) {
+      await prisma.packagePreset.update({
+        where: { id },
+        data: { isActive: false },
+      });
+    } else {
+      await prisma.packagePreset.delete({
+        where: { id },
+      });
+    }
 
     broadcastPackagesToDispensers().catch(console.warn);
 
-    return NextResponse.json({ success: true, message: "Paket berhasil dihapus / dinonaktifkan." });
+    return NextResponse.json({
+      success: true,
+      message: txCount > 0 ? "Paket dinonaktifkan (karena memiliki riwayat transaksi)." : "Paket berhasil dihapus permanen.",
+    });
   } catch (error) {
     console.error("[API_PACKAGES_DELETE]", error);
     return NextResponse.json(

@@ -283,6 +283,7 @@ inline void initDisplayDriver() {
 
   tft.init();
   tft.setRotation(DISP_ROTATION);
+  tft.setTextWrap(false); // Cegah font melebihi batas layar terlempar ke bawah
   tft.invertDisplay(false);
 
   // Perbaiki orientasi register MADCTL ST7789 agar teks tidak cermin (kiri-ke-kanan)
@@ -494,11 +495,20 @@ inline void showStandbyScreen() {
     // 2. Aksen Bar Kiri Vertikal Sesuai Tipe Ukuran
     tft.fillRoundRect(10, y + 4, 4, cardH - 8, 2, btnColor);
 
-    // 3. BARIS 1: Nama Paket di Bagian Atas Kartu (Lebar Penuh, Tidak Tertimpa Tombol!)
+    // 3. BARIS 1: Nama Paket di Bagian Atas Kartu (Font proporsional & truncate aman)
     tft.setTextColor(WV_TEXT_BLACK, WV_CARD_BG);
-    tft.setTextSize(2);
-    tft.setCursor(20, y + 8);
-    tft.printf("%d. %s", i + 1, dispenserPackages[i].name);
+    char pkgTitle[28];
+    snprintf(pkgTitle, sizeof(pkgTitle), "%d. %.16s", i + 1, dispenserPackages[i].name);
+    // Jika nama cukup panjang (>14 karakter), gunakan font size 1 dengan styling jelas agar tidak kepotong
+    if (strlen(pkgTitle) > 16) {
+      tft.setTextSize(1);
+      tft.setCursor(20, y + 10);
+      tft.print(pkgTitle);
+    } else {
+      tft.setTextSize(2);
+      tft.setCursor(20, y + 8);
+      tft.print(pkgTitle);
+    }
 
     // 4. BARIS 2: Detail Volume & Harga di Bawah Nama
     tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
@@ -575,13 +585,13 @@ inline void showQRISScreen(const char* nominal, const char* qrPayload, unsigned 
 
   tft.setTextColor(WV_TEXT_BLACK, WV_FOOTER_BG);
   tft.setTextSize(2);
-  tft.setCursor(18, boxY + (boxH - 16) / 2);
+  tft.setCursor(14, boxY + (boxH - 16) / 2);
   tft.printf("WAKTU: %02lu:%02lu", durationSec / 60, durationSec % 60);
 
   if (DISP_HEIGHT > 240) {
     tft.setTextSize(1);
     tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
-    tft.setCursor(170, boxY + 12);
+    tft.setCursor(162, boxY + 13);
     tft.print("SCAN HP");
 
     // 4. Tombol Sentuh Batal di Paling Bawah (Y: 290 - 316)
@@ -613,18 +623,18 @@ inline void updateQRISCountdown(unsigned long remainingSeconds) {
 
   tft.setTextColor(textColor, WV_FOOTER_BG);
   tft.setTextSize(2);
-  tft.setCursor(18, boxY + (boxH - 16) / 2);
+  tft.setCursor(14, boxY + (boxH - 16) / 2);
   tft.printf("WAKTU: %02lu:%02lu", mins, secs);
 
   if (DISP_HEIGHT > 240) {
     tft.setTextSize(1);
     if (remainingSeconds <= 30) {
       tft.setTextColor(WV_DANGER_RED, WV_FOOTER_BG);
-      tft.setCursor(170, boxY + 12);
+      tft.setCursor(162, boxY + 13);
       tft.print("HABIS!");
     } else {
       tft.setTextColor(WV_TEXT_MUTED, WV_FOOTER_BG);
-      tft.setCursor(170, boxY + 12);
+      tft.setCursor(162, boxY + 13);
       tft.print("SCAN HP");
     }
   }
@@ -1035,12 +1045,15 @@ inline void showCompleteScreen(const char* status, unsigned long dispensedMl, co
 
     tft.setTextColor(WV_DANGER_RED, WV_CARD_BG);
     tft.setTextSize(1);
-    tft.setCursor(18, 84);
-    tft.print(message);
+    tft.setCursor(18, 80);
+    // Batasi string pesan jika terlalu panjang agar tidak merusak tata letak
+    char safeMsg[36];
+    snprintf(safeMsg, sizeof(safeMsg), "%.32s", (message && strlen(message) > 0) ? message : "Dibatalkan");
+    tft.print(safeMsg);
 
     tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
-    tft.setCursor(18, 106);
-    tft.print("Pompa telah dimatikan seketika.");
+    tft.setCursor(18, 104);
+    tft.print("Pompa dimatikan seketika.");
 
     tft.setTextColor(WV_TEXT_MUTED, WV_BG_LIGHT);
     tft.setCursor(20, 200);

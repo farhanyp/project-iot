@@ -23,6 +23,9 @@ export interface TelemetryData {
   isScaleReady?: boolean;
   status: "READY" | "DISPENSING" | "OFFLINE" | "COMPLETED" | "STOPPED_OVERWEIGHT" | "TIMEOUT_CUTOFF";
   transactionId?: string;
+  cutoffOffset?: number;
+  safetyBias?: number;
+  effectiveTarget?: number;
   isTumblerPresent?: boolean;
   buzzerAlarmEnabled?: boolean;
   isBuzzerSounding?: boolean;
@@ -48,6 +51,8 @@ export interface CommandOptions {
   knownWeight?: number;
   factor?: number;
   maxWeight?: number;
+  offset?: number;
+  bias?: number;
   deviceId?: string;
   enabled?: boolean;
   targetDistanceCm?: number;
@@ -408,6 +413,24 @@ export function useIoTSocket(customWsUrl?: string) {
     [sendCommand]
   );
 
+  // Helper function untuk Early Cut-off Offset (g)
+  const sendSetOffset = useCallback(
+    (offset: number, deviceId = "DISPENSER-01") => {
+      setTelemetry((prev) => ({ ...prev, cutoffOffset: offset }));
+      return sendCommand("SET_OFFSET", { offset, deviceId });
+    },
+    [sendCommand]
+  );
+
+  // Helper function untuk Safety Margin Bias (g)
+  const sendSetBias = useCallback(
+    (bias: number, deviceId = "DISPENSER-01") => {
+      setTelemetry((prev) => ({ ...prev, safetyBias: bias }));
+      return sendCommand("SET_BIAS", { bias, deviceId });
+    },
+    [sendCommand]
+  );
+
   return {
     isConnected,
     mqttConnected,
@@ -427,5 +450,7 @@ export function useIoTSocket(customWsUrl?: string) {
     sendSetFlowRate,
     sendCalibratePump,
     sendResetWiFi,
+    sendSetOffset,
+    sendSetBias,
   };
 }

@@ -121,6 +121,12 @@ unsigned long pauseStartTime                 = 0;
 unsigned long dryRunCheckStartTime            = 0;
 float dryRunInitialWeight                     = 0.0f;
 
+// Variabel Early Cut-Off Offset & Adaptive Self-Tuning (Target 199g +- 1g)
+float dispenseEarlyOffsetGrams                = 15.0f;
+float targetSafetyBiasGrams                   = 1.0f;
+unsigned long pumpStopTime                    = 0;
+bool isWaitingForSettle                       = false;
+
 // ==============================================================================
 // PEMROSESAN PESAN MASUK DARI NETWORK TASK CORE 0 KE UI CORE 1
 // ==============================================================================
@@ -136,6 +142,7 @@ void handleIncomingNetworkMessages() {
       currentTransactionId = String(netMsg.orderId);
       resetAutoTareState();
       containerTareWeight = 0.0f;
+      isWaitingForSettle = false;
       Serial.printf("[UI Core 1] Pembayaran Lunas! Target: %lu mL (Order: %s)\n", targetMilliLitres, netMsg.orderId);
       showPlaceTumblerScreen(targetMilliLitres, netMsg.orderId);
     }
@@ -171,6 +178,7 @@ void handleIncomingNetworkMessages() {
       dispenseStartTime = millis();
       dryRunCheckStartTime = millis();
       dryRunInitialWeight = currentLiveWeight;
+      isWaitingForSettle = false;
       isDispensing = true;
       isDispensePaused = false;
 
@@ -180,6 +188,7 @@ void handleIncomingNetworkMessages() {
     else if (netMsg.type == NET_MSG_CMD_STOP) {
       isDispensing = false;
       isDispensePaused = false;
+      isWaitingForSettle = false;
       stopPump();
       showCompleteScreen("EMERGENCY_STOPPED", dispensedMilliLitres, "Tombol Stop Darurat Ditekan");
     }
@@ -187,6 +196,7 @@ void handleIncomingNetworkMessages() {
       // HANYA reset jika bukan sedang di SCREEN_QRIS atau SCREEN_DISPENSING
       if (currentScreen != SCREEN_QRIS && currentScreen != SCREEN_DISPENSING) {
         isDispensing = false;
+        isWaitingForSettle = false;
         stopPump();
         dispensedMilliLitres = 0;
         targetMilliLitres = 0;
@@ -205,6 +215,12 @@ void handleIncomingNetworkMessages() {
     }
     else if (netMsg.type == NET_MSG_CMD_SET_MAX_WEIGHT) {
       saveMaxWeight(netMsg.floatVal);
+    }
+    else if (netMsg.type == NET_MSG_CMD_SET_OFFSET) {
+      saveDispenseOffset(netMsg.floatVal);
+    }
+    else if (netMsg.type == NET_MSG_CMD_SET_BIAS) {
+      saveSafetyBias(netMsg.floatVal);
     }
   }
 }
@@ -515,6 +531,9 @@ void setup() {
   initBuzzer();
   beepOnce(100);
 
+  // Inisialisasi Paket Menu Air dari Flash NVS (Memulihkan menu tersimpan saat boot)
+  loadPackagesFromNVS();
+
   // Inisialisasi WiFiManager Captive Portal (Sinkron saat boot)
   setupWiFiManager();
 
@@ -697,13 +716,49 @@ void handleSerialCommands() {
       Serial.println(">> [ERROR] Batas beban minimal 100 gram (Contoh: MAX:2500)");
     }
   }
-  // 16. Bantuan Command
+  // 16. Perintah OFFSET:<gram> (Atur Early Cut-off Offset)
+  else if (cmd.startsWith("OFFSET:") || cmd.startsWith("offset:")) {
+    String valStr = cmd.substring(7);
+    valStr.trim();
+    float newOff = valStr.toFloat();
+    if (newOff >= 0.0f && newOff <= 50.0f) {
+      saveDispenseOffset(newOff);
+    } else {
+      Serial.println(">> [ERROR] Nilai offset antara 0.0 s/d 50.0 gram (Contoh: OFFSET:15.0)");
+    }
+  }
+  // 17. Perintah OFFSET? (Cek Parameter Cut-off & Target Efektif)
+  else if (cmd.equalsIgnoreCase("OFFSET?") || cmd.equalsIgnoreCase("BIAS?")) {
+    Serial.println("==================================================");
+    Serial.println(">> STATUS EARLY CUT-OFF & SAFETY BIAS:");
+    Serial.printf("   - Early Cut-off Offset : %.1f gram\n", dispenseEarlyOffsetGrams);
+    Serial.printf("   - Safety Margin Bias   : %.1f gram\n", targetSafetyBiasGrams);
+    Serial.printf("   - Target Cup 200 mL    : %.1f gram (Efektif: 199g +- 1g)\n", 200.0f - targetSafetyBiasGrams);
+    Serial.printf("   - Trigger Cut-off Pompa: %.1f gram (Pompa mati di angka ini)\n", 200.0f - targetSafetyBiasGrams - dispenseEarlyOffsetGrams);
+    Serial.printf("   - Waktu Tunggu Settle  : 800 ms\n");
+    Serial.println("==================================================");
+  }
+  // 18. Perintah BIAS:<gram> (Atur Safety Bias, default 1.0g untuk 199g)
+  else if (cmd.startsWith("BIAS:") || cmd.startsWith("bias:")) {
+    String valStr = cmd.substring(5);
+    valStr.trim();
+    float newBias = valStr.toFloat();
+    if (newBias >= 0.0f && newBias <= 20.0f) {
+      saveSafetyBias(newBias);
+    } else {
+      Serial.println(">> [ERROR] Nilai bias antara 0.0 s/d 20.0 gram (Contoh: BIAS:1.0)");
+    }
+  }
+  // 19. Bantuan Command
   else if (cmd.equalsIgnoreCase("HELP") || cmd.equalsIgnoreCase("?")) {
     Serial.println(">> PERINTAH SERIAL TERSEDIA:");
     Serial.println("   - TARE        : Nolkan timbangan (Tara) saat wadah diletakkan");
     Serial.println("   - WEIGHT?     : Cek status timbangan HX711 & pembacaan berat live");
     Serial.println("   - CAL:<gram>  : Kalibrasi timbangan dengan beban acuan (Contoh: CAL:200)");
     Serial.println("   - FACTOR:<f>  : Atur faktor kalibrasi manual (Contoh: FACTOR:-420.0)");
+    Serial.println("   - OFFSET:<g>  : Atur Early Cut-off Offset inersia selang (Contoh: OFFSET:15.0)");
+    Serial.println("   - BIAS:<g>    : Atur Safety Bias anti-tumpah (Contoh: BIAS:1.0 -> 199g)");
+    Serial.println("   - OFFSET?     : Cek parameter cut-off offset & target efektif");
     Serial.println("   - MAX:<gram>  : Atur batas beban maksimal platform (Contoh: MAX:2500)");
     Serial.println("   - FLOW:<rate> : Atur debit pompa dinamis (Contoh: FLOW:25.0 atau FLOW:30.0)");
     Serial.println("   - FLOW?       : Cek debit saat ini & tabel simulasi waktu pengisian");
@@ -759,7 +814,7 @@ void loop() {
   if (isDispensing) {
     // PROTEKSI SENSOR WADAH: DUAL SENSOR SMART PAUSE & RESUME (Ultrasonik + Timbangan)
     // Wadah dianggap terlepas jika sensor ultrasonik kosong ATAU beban timbangan turun tajam ke negatif (< -15g)
-    bool isTumblerRemoved = (!isTumblerPresent || currentLiveWeight < -15.0f);
+    bool isTumblerRemoved = !isWaitingForSettle && (!isTumblerPresent || currentLiveWeight < -15.0f);
 
     if (isTumblerRemoved) {
       // WADAH TERLEPAS / DITARIK!
@@ -777,6 +832,7 @@ void loop() {
         Serial.println("[TIMEOUT PAUSE] Wadah tidak ditaruh kembali selama 60 detik. Menyelesaikan otomatis...");
         isDispensing = false;
         isDispensePaused = false;
+        isWaitingForSettle = false;
         stopPump();
         showCompleteScreen("COMPLETED", dispensedMilliLitres, "Waktu Jeda Habis (Auto Selesai)");
 
@@ -801,10 +857,12 @@ void loop() {
         lastPumpIterationMillis = currentMillis;
         dryRunCheckStartTime = currentMillis;
         dryRunInitialWeight = dispensedWeightGrams;
-        startPump();
-        beepOnce(80); // Bip konfirmasi resume
-        Serial.printf("[SAFETY RESUME] Wadah terpasang kembali! Pompa DINYALAKAN kembali. Melanjutkan dari %lu mL (%.1f g)...\n",
-                      dispensedMilliLitres, dispensedWeightGrams);
+        if (!isWaitingForSettle) {
+          startPump();
+          beepOnce(80); // Bip konfirmasi resume
+          Serial.printf("[SAFETY RESUME] Wadah terpasang kembali! Pompa DINYALAKAN kembali. Melanjutkan dari %lu mL (%.1f g)...\n",
+                        dispensedMilliLitres, dispensedWeightGrams);
+        }
       }
 
       // Akumulasikan waktu aktif pompa berputar
@@ -895,18 +953,40 @@ void loop() {
       }
     }
 
-    // Evaluasi Syarat Otomatis Cut-Off Pompa Murni Berbasis Berat Target (1 gram ~ 1 mL)
-    bool targetReached = (dispensedWeightGrams >= (float)targetMilliLitres);
+    // --------------------------------------------------------------------------
+    // ALGORITMA EARLY CUT-OFF OFFSET & ADAPTIVE SELF-TUNING (Target 199g +- 1g)
+    // --------------------------------------------------------------------------
+    float effectiveTarget = max(0.0f, (float)targetMilliLitres - targetSafetyBiasGrams);
+    float cutoffThreshold = max(0.0f, effectiveTarget - dispenseEarlyOffsetGrams);
 
-    if (targetReached) {
+    // Tahap 1: Pemicu Cut-off Dini (Matikan Pompa sebelum Target Meluap)
+    if (!isWaitingForSettle && dispensedWeightGrams >= cutoffThreshold) {
+      stopPump();
+      pumpStopTime = currentMillis;
+      isWaitingForSettle = true;
+      beepOnce(60);
+      Serial.printf("[EARLY CUTOFF] Dipotong dini di %.1f g (Target Efektif: %.1f g, Offset: %.1f g). Menunggu stabilisasi tetesan 800ms...\n",
+                    dispensedWeightGrams, effectiveTarget, dispenseEarlyOffsetGrams);
+    }
+
+    // Tahap 2: Periode Tunggu Stabilisasi Tetesan (800 ms) Pasca-Pompa Mati
+    if (isWaitingForSettle && (currentMillis - pumpStopTime >= 800)) {
+      isWaitingForSettle = false;
       isDispensing = false;
       isDispensePaused = false;
-      stopPump();
-      beepPattern(2);
-      Serial.printf("[DISPENSE TARGET REACHED] Target tercapai: %.1f g (Target: %lu mL). Pompa dimatikan.\n",
-                    dispensedWeightGrams, targetMilliLitres);
 
-      showCompleteScreen("COMPLETED", dispensedMilliLitres, "Pengisian Selesai");
+      // Ambil berat akhir riil yang sudah tenang
+      float finalWeight = max(0.0f, currentLiveWeight);
+      dispensedMilliLitres = (unsigned long)round(finalWeight);
+
+      // Jalankan algoritma auto-tune adaptif
+      updateAdaptiveOffset(finalWeight, (float)targetMilliLitres);
+
+      beepPattern(2);
+      Serial.printf("[DISPENSE FINAL SETTLED] Hasil Akhir Stabil: %.1f g (Target: %.1f g). Pengisian Selesai!\n",
+                    finalWeight, effectiveTarget);
+
+      showCompleteScreen("COMPLETED", dispensedMilliLitres, "Pengisian Selesai Presisi");
 
       // Kirim event selesai ke Core 0
       UIToNetMessage uiMsg;

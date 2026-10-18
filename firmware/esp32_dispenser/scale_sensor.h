@@ -20,6 +20,8 @@ inline void initScaleSensor() {
   preferences.begin("wv_scale", false);
   calibrationFactor = preferences.getFloat("cal_factor", -420.0f);
   maxWeightLimit = preferences.getFloat("max_weight", 2500.0f);
+  dispenseEarlyOffsetGrams = preferences.getFloat("disp_offset", 15.0f);
+  targetSafetyBiasGrams = preferences.getFloat("safe_bias", 1.0f);
   preferences.end();
 
   if (calibrationFactor == 0.0f) calibrationFactor = -420.0f;
@@ -33,8 +35,8 @@ inline void initScaleSensor() {
       containerTareWeight = 0.0f;
       currentLiveWeight = 0.0f;
       dispensedWeightGrams = 0.0f;
-      Serial.printf("[HX711 STATUS] Normal! Raw: %ld | Faktor Kalibrasi: %.2f | Batas Maks: %.0f g\n", 
-                    lastRawAdcReading, calibrationFactor, maxWeightLimit);
+      Serial.printf("[HX711 STATUS] Normal! Raw: %ld | Faktor: %.2f | Maks: %.0f g | Offset Cut-Off: %.1f g | Bias: -%.1f g\n", 
+                    lastRawAdcReading, calibrationFactor, maxWeightLimit, dispenseEarlyOffsetGrams, targetSafetyBiasGrams);
     } else {
       isScaleReady = false;
       Serial.printf("[HX711 PERINGATAN] Raw ADC di luar batas normal (%ld)! Cek jalur kabel & VCC (Wajib 5V).\n", 
@@ -114,6 +116,53 @@ inline void saveMaxWeight(float maxW) {
   preferences.end();
 
   Serial.printf(">> [OK] Batas beban platform: %.0f gram (Tersimpan ke NVS Flash)\n", maxWeightLimit);
+}
+
+inline void saveDispenseOffset(float offset) {
+  if (offset < 0.0f) offset = 0.0f;
+  if (offset > 50.0f) offset = 50.0f;
+  dispenseEarlyOffsetGrams = offset;
+
+  preferences.begin("wv_scale", false);
+  preferences.putFloat("disp_offset", dispenseEarlyOffsetGrams);
+  preferences.end();
+
+  beepOnce(80);
+  Serial.printf(">> [OK] Early Cut-Off Offset diperbarui: %.1f gram (Tersimpan ke NVS Flash)\n", dispenseEarlyOffsetGrams);
+}
+
+inline void saveSafetyBias(float bias) {
+  if (bias < 0.0f) bias = 0.0f;
+  if (bias > 20.0f) bias = 20.0f;
+  targetSafetyBiasGrams = bias;
+
+  preferences.begin("wv_scale", false);
+  preferences.putFloat("safe_bias", targetSafetyBiasGrams);
+  preferences.end();
+
+  beepOnce(80);
+  Serial.printf(">> [OK] Safety Margin Bias diperbarui: %.1f gram (Target 200mL -> %.1f g)\n",
+                targetSafetyBiasGrams, 200.0f - targetSafetyBiasGrams);
+}
+
+inline void updateAdaptiveOffset(float finalWeight, float nominalTarget) {
+  float effectiveTarget = max(0.0f, nominalTarget - targetSafetyBiasGrams); // Misal 200 - 1 = 199.0g
+  float error = finalWeight - effectiveTarget;
+
+  // Koreksi adaptif jika error dalam rentang wajar (+- 15g) untuk menghindari sentuhan/goncangan eksternal
+  if (abs(error) > 0.3f && abs(error) <= 15.0f) {
+    float correction = 0.35f * error;
+    float newOffset = dispenseEarlyOffsetGrams + correction;
+    if (newOffset < 5.0f) newOffset = 5.0f;
+    if (newOffset > 35.0f) newOffset = 35.0f;
+
+    Serial.printf("[AUTO-TUNE] Target: %.1f g | Riil: %.1f g | Error: %+.2f g | Offset: %.2f g -> %.2f g\n",
+                  effectiveTarget, finalWeight, error, dispenseEarlyOffsetGrams, newOffset);
+    saveDispenseOffset(newOffset);
+  } else {
+    Serial.printf("[AUTO-TUNE] Target: %.1f g | Riil: %.1f g | Error: %+.2f g (Presisi OK!)\n",
+                  effectiveTarget, finalWeight, error);
+  }
 }
 
 inline void updateScaleReading() {
