@@ -867,9 +867,20 @@ void handleSerialCommands() {
     Serial.printf("   - Untuk 1.500 mL : butuh waktu sekitar %.1f detik\n", 1500.0f / pumpFlowRateMlPerSec);
     Serial.println("==================================================");
   }
-  // 11. Bantuan Command
+  // 11. Perintah SONG (Uji Coba Melodi Lagu Buzzer Take on Me)
+  else if (cmd.equalsIgnoreCase("SONG") || cmd.equalsIgnoreCase("LAGU")) {
+    Serial.println(">> [OK] Memulai pemutaran lagu Take on Me pada buzzer...");
+    startBootSong();
+  }
+  else if (cmd.equalsIgnoreCase("SONG:STOP") || cmd.equalsIgnoreCase("STOP:SONG")) {
+    Serial.println(">> [OK] Menghentikan melodi lagu buzzer.");
+    stopBootSong();
+  }
+  // 12. Bantuan Command
   else if (cmd.equalsIgnoreCase("HELP") || cmd.equalsIgnoreCase("?")) {
     Serial.println(">> PERINTAH SERIAL TERSEDIA:");
+    Serial.println("   - SONG        : Uji coba pemutaran lagu buzzer (Take on Me)");
+    Serial.println("   - SONG:STOP   : Hentikan pemutaran lagu buzzer");
     Serial.println("   - FLOW:<rate> : Atur debit pompa dinamis (Contoh: FLOW:25.0 atau FLOW:30.0)");
     Serial.println("   - FLOW?       : Cek debit saat ini & tabel simulasi waktu pengisian");
     Serial.println("   - WIFI:RESET  : Hapus Wi-Fi tersimpan & buka hotspot WaterVend-Setup");
