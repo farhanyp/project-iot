@@ -439,6 +439,18 @@ inline void mqttCallback(char* topic, byte* message, unsigned int length) {
     beepPattern(3);
     resetWiFiSettings();
   }
+
+  // Perintah 13: PLAY_SONG (Putar Melodi Lagu Take on Me dari Web)
+  else if (action == "PLAY_SONG" || action == "START_SONG") {
+    Serial.println("[MQTT Core 0] Menerima perintah PLAY_SONG dari Web! Memutar lagu...");
+    startBootSong();
+  }
+
+  // Perintah 14: STOP_SONG (Hentikan Melodi Lagu dari Web)
+  else if (action == "STOP_SONG") {
+    Serial.println("[MQTT Core 0] Menerima perintah STOP_SONG dari Web! Menghentikan lagu.");
+    stopBootSong();
+  }
 }
 
 // Menghubungkan ulang ke Broker MQTT secara NON-BLOCKING pada Core 0

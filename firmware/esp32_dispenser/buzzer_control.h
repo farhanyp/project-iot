@@ -251,13 +251,13 @@ inline void setBuzzerAlarmEnabled(bool enabled) {
   Serial.printf("[BUZZER] Status Alarm Diubah: %s\n", isBuzzerAlarmEnabled ? "ON (AKTIF)" : "OFF (SENYAP)");
 }
 
-// Memicu bip non-blocking (Thread-safe)
+// Memicu bip non-blocking (Mendukung Buzzer Pasif PWM & Buzzer Aktif)
 inline void triggerBuzzerBeep(int count = 1, int durationMs = 40) {
   stopBootSong();
   buzzerBeepCountRemaining = count;
   buzzerBeepUntil = millis() + durationMs;
   buzzerNextBeepTime = millis() + durationMs + 70;
-  digitalWrite(PIN_BUZZER, HIGH);
+  tone(PIN_BUZZER, 2400); // 2400 Hz menghasilkan nada nyaring untuk buzzer pasif maupun aktif
   isBuzzerSounding = true;
 }
 
@@ -293,10 +293,9 @@ inline void updateBuzzer() {
   // 1. Prioritas Utama: Evaluasi antrean bip
   if (buzzerBeepCountRemaining > 0) {
     if (now < buzzerBeepUntil) {
-      digitalWrite(PIN_BUZZER, HIGH);
-      isBuzzerSounding = true;
       return;
     } else {
+      noTone(PIN_BUZZER);
       digitalWrite(PIN_BUZZER, LOW);
       isBuzzerSounding = false;
       if (now >= buzzerNextBeepTime) {
@@ -304,7 +303,7 @@ inline void updateBuzzer() {
         if (buzzerBeepCountRemaining > 0) {
           buzzerBeepUntil = now + 90;
           buzzerNextBeepTime = now + 160;
-          digitalWrite(PIN_BUZZER, HIGH);
+          tone(PIN_BUZZER, 2400);
           isBuzzerSounding = true;
           return;
         }
@@ -316,6 +315,7 @@ inline void updateBuzzer() {
 
   // 2. Jika tidak ada antrean bip & bukan mode kontinu/lagu, pastikan buzzer MATI (LOW)
   if (isBuzzerSounding && buzzerBeepUntil > 0) {
+    noTone(PIN_BUZZER);
     digitalWrite(PIN_BUZZER, LOW);
     isBuzzerSounding = false;
   }

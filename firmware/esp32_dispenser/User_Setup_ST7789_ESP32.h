@@ -49,8 +49,8 @@
 #define SMOOTH_FONT // Anti-aliased fonts
 
 // 5. KECEPATAN SPI BUS (SANGAT KRUSIAL UNTUK MENGHILANGKAN LAG & GLITCH!)
-// Kecepatan SPI Layar ST7789 (40MHz = Sangat cepat, mulus, dan stabil)
-#define SPI_FREQUENCY       40000000 
+// Kecepatan SPI Layar ST7789 (27MHz adalah batas maksimal hardware GPIO Matrix ESP32 untuk pinout custom)
+#define SPI_FREQUENCY       27000000 
 
 // Kecepatan SPI Touch Screen XPT2046
 // (Maksimal chip XPT2046 adalah 2.5MHz. TFT_eSPI akan otomatis beralih ke 2.5MHz

@@ -18,6 +18,8 @@ export default function SensorTestPage() {
     sendResetSensor,
     sendSetProximityConfig,
     sendTestBuzzer,
+    sendPlaySong,
+    sendStopSong,
   } = useIoTSocket();
 
   const [targetDistance, setTargetDistance] = useState<number>(12.0);
@@ -140,11 +142,19 @@ export default function SensorTestPage() {
         <SerialGuide />
       </div>
 
-      {/* Uji Coba Suara Buzzer Manual */}
+      {/* Uji Coba Suara Buzzer Manual & Pemutar Melodi */}
       <BuzzerTestTriggers
         onTestBuzzer={(pulses) => {
           sendTestBuzzer(pulses);
           showFeedback(`Mengirim perintah Bip ${pulses}x ke Buzzer...`);
+        }}
+        onPlaySong={() => {
+          sendPlaySong();
+          showFeedback("Memulai pemutaran melodi lagu 'Take on Me' pada Buzzer...");
+        }}
+        onStopSong={() => {
+          sendStopSong();
+          showFeedback("Menghentikan pemutaran melodi lagu pada Buzzer.");
         }}
       />
 

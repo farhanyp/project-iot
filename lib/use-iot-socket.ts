@@ -208,6 +208,8 @@ export function useIoTSocket(customWsUrl?: string) {
         | "RESET_SENSOR"
         | "SET_PROXIMITY_CONFIG"
         | "TEST_BUZZER"
+        | "PLAY_SONG"
+        | "STOP_SONG"
         | string,
       optionsOrVolume?: number | CommandOptions,
       fallbackDeviceId = "DISPENSER-01"
@@ -303,6 +305,22 @@ export function useIoTSocket(customWsUrl?: string) {
     [sendCommand]
   );
 
+  // Helper function untuk Memutar Lagu Melodi Buzzer (Take on Me)
+  const sendPlaySong = useCallback(
+    (deviceId = "DISPENSER-01") => {
+      return sendCommand("PLAY_SONG", { deviceId });
+    },
+    [sendCommand]
+  );
+
+  // Helper function untuk Menghentikan Lagu Melodi Buzzer
+  const sendStopSong = useCallback(
+    (deviceId = "DISPENSER-01") => {
+      return sendCommand("STOP_SONG", { deviceId });
+    },
+    [sendCommand]
+  );
+
   // Helper function untuk Menetapkan Debit Pompa Dinamis (mL/detik)
   const sendSetFlowRate = useCallback(
     (flowRate: number, deviceId = "DISPENSER-01") => {
@@ -344,6 +362,8 @@ export function useIoTSocket(customWsUrl?: string) {
     sendResetSensor,
     sendSetProximityConfig,
     sendTestBuzzer,
+    sendPlaySong,
+    sendStopSong,
     sendSetFlowRate,
     sendCalibratePump,
     sendResetWiFi,

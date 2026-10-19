@@ -35,7 +35,7 @@ const int PIN_TRIGGER_RESET_WIFI = 0;  // GPIO 0 (Tombol BOOT ESP32)
 // Pin Sensor Ultrasonik HC-SR04 & Buzzer (Sesuai Dokumen Hal. 3):
 const int PIN_ULTRASONIC_TRIG    = 16; // GPIO 16 (Pin Trig D16 sesuai Dokumen Hal. 3)
 const int PIN_ULTRASONIC_ECHO    = 17; // GPIO 17 (Pin Echo D17 sesuai Dokumen Hal. 3)
-const int PIN_BUZZER             = 15; // GPIO 15 (Pin D15 Buzzer (+) sesuai Dokumen Hal. 3)
+const int PIN_BUZZER             = 27; // GPIO 27 (Wajib dipindah dari GPIO 15 agar TIDAK bentrok dengan MISO/T_DO Touch Screen!)
 
 #define RELAY_ACTIVE_STATE LOW
 
