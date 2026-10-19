@@ -292,8 +292,8 @@ inline void initDisplayDriver() {
   tft.writedata(TFT_MADCTL_VAL);
   tft.endWrite();
 
-  // Inisialisasi SPI hardware untuk XPT2046 dengan pin eksplisit
-  SPI.begin(18, 19, 23, TOUCH_CS);
+  // Inisialisasi SPI hardware untuk XPT2046 dengan pin eksplisit sesuai config.h
+  SPI.begin(TFT_SCLK, TFT_MISO, TFT_MOSI, TOUCH_CS);
   ts.begin(SPI);
   ts.setRotation(DISP_ROTATION);
 
@@ -302,7 +302,7 @@ inline void initDisplayDriver() {
   initTouchCalibration(forceRecal);
 
   tft.fillScreen(TFT_BLACK);
-  Serial.println("[TFT_eSPI] Display ST7789 & Touch XPT2046 siap di 40MHz!");
+  Serial.println("[TFT_eSPI] Display ST7789 & Touch XPT2046 siap!");
 }
 
 // Variabel internal koordinat QR Code

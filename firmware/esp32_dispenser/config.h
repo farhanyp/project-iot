@@ -13,30 +13,29 @@
 // 1. DEFINISI PIN PERANGKAT KERAS (HARDWARE PINOUT)
 // ==============================================================================
 
-// Catatan Pin Layar ST7789 & Touch XPT2046 (Jalur Hardware VSPI ESP32):
-// TFT_MOSI / T_DIN = GPIO 23
-// TFT_SCLK / T_CLK = GPIO 18
-// TFT_MISO / T_DO  = GPIO 19
-// TFT_CS           = GPIO 17 (Chip Select LCD)
-// TFT_DC           = GPIO 2  (Data / Command LCD)
-// TFT_RST          = GPIO 15 (Reset LCD)
-// TOUCH_CS         = GPIO 21 (Chip Select Touch Screen XPT2046)
-// TOUCH_IRQ        = GPIO 22 (T_IRQ - Deteksi interrupt sentuhan)
+// Catatan Pin Layar ST7789 & Touch XPT2046 (Sesuai Dokumentasi_Dispenser_DIY_Terbaru.pdf):
+// Jalur Bus SPI Bersama (Layar & Touchscreen):
+#define TFT_MOSI       2  // GPIO 2  (T_DIN & SDI / MOSI sesuai Dokumen Hal. 2)
+#define TFT_SCLK       4  // GPIO 4  (T_CLK & SCK / Clock sesuai Dokumen Hal. 2)
+#define TFT_MISO      15  // GPIO 15 (T_DO & SDI/SDO / MISO sesuai Dokumen Hal. 2)
 
-#define TFT_CS         17
-#define TFT_DC          2
-#define TFT_RST        15
-#define TOUCH_CS       21
-#define TOUCH_IRQ_PIN  22 // GPIO 22 untuk deteksi hardware interrupt sentuhan
+// Jalur Kontrol Mandiri Layar LCD ST7789:
+#define TFT_CS        18  // GPIO 18 (Chip Select Layar sesuai Dokumen Hal. 2)
+#define TFT_DC        21  // GPIO 21 (Data / Command Layar sesuai Dokumen Hal. 2)
+#define TFT_RST       19  // GPIO 19 (Reset Layar sesuai Dokumen Hal. 2)
 
-// Pin Modul Relay Pompa Air BR314
-const int PIN_RELAY_PUMP_CH1     = 5;  // GPIO 5 (Pompa Air, Active LOW)
+// Jalur Kontrol Mandiri Touch Screen XPT2046:
+#define TOUCH_CS      22  // GPIO 22 (Chip Select Touchscreen sesuai Dokumen Hal. 2)
+#define TOUCH_IRQ_PIN 23  // GPIO 23 (T_IRQ - Interupsi Sentuhan sesuai Dokumen Hal. 2)
+
+// Pin Modul Relay Pompa Air (Sinyal IN1 baris pin 32 pada expansion board):
+const int PIN_RELAY_PUMP_CH1     = 32; // GPIO 32 (Pompa Air, Active LOW)
 const int PIN_TRIGGER_RESET_WIFI = 0;  // GPIO 0 (Tombol BOOT ESP32)
 
-// Pin Sensor Ultrasonik HC-SR04 & Buzzer
-const int PIN_ULTRASONIC_TRIG    = 25; // GPIO 25 (Output Trigger Pulsa HC-SR04)
-const int PIN_ULTRASONIC_ECHO    = 26; // GPIO 26 (Input Echo Pantulan HC-SR04)
-const int PIN_BUZZER             = 27; // GPIO 27 (Kaki Positif Buzzer)
+// Pin Sensor Ultrasonik HC-SR04 & Buzzer (Sesuai Dokumen Hal. 3):
+const int PIN_ULTRASONIC_TRIG    = 16; // GPIO 16 (Pin Trig D16 sesuai Dokumen Hal. 3)
+const int PIN_ULTRASONIC_ECHO    = 17; // GPIO 17 (Pin Echo D17 sesuai Dokumen Hal. 3)
+const int PIN_BUZZER             = 15; // GPIO 15 (Pin D15 Buzzer (+) sesuai Dokumen Hal. 3)
 
 #define RELAY_ACTIVE_STATE LOW
 

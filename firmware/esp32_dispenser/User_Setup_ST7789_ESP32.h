@@ -22,21 +22,21 @@
 #define TFT_WIDTH  240
 #define TFT_HEIGHT 320
 
-// 3. PINOUT HARDWARE ESP32 (Hardware VSPI Default)
+// 3. PINOUT HARDWARE ESP32 (Sesuai Dokumentasi_Dispenser_DIY_Terbaru.pdf)
 // Pin SPI Bersama (Layar & Touch)
-#define TFT_MOSI 23  // SDA / D1 pada LCD & T_DIN pada Touch
-#define TFT_SCLK 18  // SCL / SCK pada LCD & T_CLK pada Touch
-#define TFT_MISO 19  // T_DO pada Touch XPT2046 (Wajib untuk baca koordinat sentuh)
+#define TFT_MOSI  2  // SDA / D1 pada LCD & T_DIN pada Touch (GPIO 2)
+#define TFT_SCLK  4  // SCL / SCK pada LCD & T_CLK pada Touch (GPIO 4)
+#define TFT_MISO 15  // T_DO pada Touch XPT2046 & SDO (GPIO 15)
 
 // Pin Kontrol Khusus Layar LCD
-#define TFT_CS   17  // Chip Select LCD (GPIO 17)
-#define TFT_DC    2  // Data/Command (GPIO 2)
-#define TFT_RST  15  // Reset LCD (GPIO 15)
+#define TFT_CS   18  // Chip Select LCD (GPIO 18)
+#define TFT_DC   21  // Data/Command (GPIO 21)
+#define TFT_RST  19  // Reset LCD (GPIO 19)
 
 // Pin Kontrol Khusus Touch Screen XPT2046
 // CATATAN: Wajib dikomentari jika menggunakan library eksternal XPT2046_Touchscreen
-// agar TFT_eSPI tidak mengontrol GPIO 21 dan tidak menimbulkan konflik bus SPI!
-// #define TOUCH_CS 21
+// agar TFT_eSPI tidak mengontrol GPIO 22 dan tidak menimbulkan konflik bus SPI!
+// #define TOUCH_CS 22
 
 // 4. DAFTAR FONT YANG DIAKTIFKAN
 #define LOAD_GLCD   // Font standar 8-pixel
