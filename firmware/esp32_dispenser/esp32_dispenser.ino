@@ -787,8 +787,9 @@ void handleSerialCommands() {
     Serial.println("==================================================");
     Serial.printf(">> STATUS SENSOR ULTRASONIK HC-SR04:\n");
     Serial.printf("   - Jarak Terukur Live  : %.1f cm\n", liveDist);
-    Serial.printf("   - Target Jarak Acuan  : <= %.1f cm\n", targetDistanceCm);
-    Serial.printf("   - Status Tumbler      : %s\n", (liveDist >= 1.5f && liveDist <= targetDistanceCm) ? "TERPASANG (OK)" : "TIDAK ADA / KOSONG");
+    Serial.printf("   - Jarak Median Filter : %.1f cm\n", currentMeasuredDistanceCm);
+    Serial.printf("   - Target Jarak Acuan  : <= %.1f cm (Lepas: > %.1f cm)\n", targetDistanceCm, targetDistanceCm + HYSTERESIS_MARGIN_CM);
+    Serial.printf("   - Status Tumbler      : %s\n", isTumblerPresent ? "TERPASANG (OK)" : "TIDAK ADA / KOSONG");
     Serial.printf("   - Alarm Buzzer        : %s\n", isBuzzerAlarmEnabled ? "AKTIF (ON)" : "MATI (OFF)");
     Serial.println("==================================================");
   }
