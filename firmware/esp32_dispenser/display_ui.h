@@ -832,7 +832,7 @@ inline void updatePlaceTumblerUI(bool isPresent, float distCm) {
       tft.setTextColor(WV_TEXT_BLACK, WV_FOOTER_BG);
       tft.setTextSize(2);
       tft.setCursor(18, badgeY + 22);
-      tft.printf("SIAP (Jarak: %.1f cm)", distCm);
+      tft.print("SIAP (TERDETEKSI)");
 
       // Tombol MULAI ISI AIR > (Hijau Aktif)
       tft.fillRoundRect(8, btnY, 224, btnH, 8, WV_SUCCESS_GREEN);
@@ -851,7 +851,7 @@ inline void updatePlaceTumblerUI(bool isPresent, float distCm) {
       tft.setTextColor(WV_PRIMARY_BLUE, WV_CARD_BG);
       tft.setTextSize(1);
       tft.setCursor(22, guideY + 10);
-      tft.print("Sensor ultrasonik mendeteksi wadah.");
+      tft.print("Sensor optik mendeteksi wadah.");
       tft.setTextColor(WV_TEXT_MUTED, WV_CARD_BG);
       tft.setCursor(22, guideY + 26);
       tft.print("Air akan mengalir otomatis sesuai kuota.");

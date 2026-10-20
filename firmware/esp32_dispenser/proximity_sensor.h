@@ -3,172 +3,115 @@
 #include "buzzer_control.h"
 
 // ==============================================================================
-// DRIVER SENSOR ULTRASONIK HC-SR04 PRESISI TINGGI
-// (Filter Median 5-Sampel, Histeresis Schmitt-Trigger, & Debounce Asimetris)
-// Solusi: Mengatasi sensor "ngeblink-blink", pantulan meleset, dan kurang sensitif
+// DRIVER SENSOR PROXIMITY OPTIK INDUSTRIAL CHE18-30NA-B710
+// Tipe: Photoelectric Switch M18 Diffuse Reflective (Infrared)
+// Output: NPN Normally Open (NO) / Active LOW
+// Jarak: Murni diatur fisik melalui baut sekrup potensiometer di belakang sensor
 // ==============================================================================
 
-// Parameter Histeresis (Mencegah osilasi status / blinking di ambang batas)
-const float HYSTERESIS_MARGIN_CM   = 3.0f; // Toleransi margin lepas (+3.0 cm)
-const float MIN_DETECT_DISTANCE_CM = 1.0f; // Batas minimal agar tidak buta pada wadah sangat dekat
-
 inline void initProximitySensor() {
-  pinMode(PIN_ULTRASONIC_TRIG, OUTPUT);
-  pinMode(PIN_ULTRASONIC_ECHO, INPUT);
-  digitalWrite(PIN_ULTRASONIC_TRIG, LOW);
+  // Aktifkan internal pull-up resistor ESP32 untuk output NPN Open Collector
+  pinMode(PIN_PROXIMITY_SENSOR, INPUT_PULLUP);
 
-  preferences.begin("wv_prox", false);
-  targetDistanceCm = preferences.getFloat("dist_cm", 12.0f); // Default jangkauan deteksi <= 12 cm
-  sensorActiveHigh = preferences.getBool("act_high", true);
+  preferences.begin("wv_prox_v3", false);
+  // Default untuk NPN Normally Open (NO) adalah Active LOW (sensorActiveHigh = false)
+  // Ketika botol terdeteksi -> NPN ON menarik pin ke GND (LOW)
+  sensorActiveHigh = preferences.getBool("act_high", false);
   preferences.end();
 
-  Serial.printf("[ULTRASONIC HC-SR04] Inisialisasi: TRIG=GPIO %d | ECHO=GPIO %d | Target Acuan: <= %.1f cm (Histeresis Lepas: > %.1f cm)\n",
-                PIN_ULTRASONIC_TRIG, PIN_ULTRASONIC_ECHO, targetDistanceCm, targetDistanceCm + HYSTERESIS_MARGIN_CM);
+  // Inisialisasi pembacaan awal
+  int rawPin = digitalRead(PIN_PROXIMITY_SENSOR);
+  bool initialDetected = sensorActiveHigh ? (rawPin == HIGH) : (rawPin == LOW);
+  isTumblerPresent = initialDetected;
+  currentMeasuredDistanceCm = isTumblerPresent ? 5.0f : 999.0f;
+
+  Serial.printf("[PROXIMITY CHE18-30NA-B710] Inisialisasi: Pin GPIO %d (INPUT_PULLUP) | Logika: %s (Raw Pin: %s) -> Status Awal: %s\n",
+                PIN_PROXIMITY_SENSOR,
+                sensorActiveHigh ? "Active HIGH" : "Active LOW (NPN NO Default)",
+                rawPin == HIGH ? "HIGH" : "LOW",
+                isTumblerPresent ? "WADAH TERPASANG" : "KOSONG");
 }
 
-inline void saveUltrasonicTargetDistance(float distCm) {
-  if (distCm < 2.0f) distCm = 2.0f;
-  if (distCm > 50.0f) distCm = 50.0f;
-  targetDistanceCm = distCm;
-
-  preferences.begin("wv_prox", false);
-  preferences.putFloat("dist_cm", targetDistanceCm);
+// Simpan konfigurasi polaritas ke NVS Flash
+inline void saveProximityPolarity(bool activeHigh) {
+  sensorActiveHigh = activeHigh;
+  preferences.begin("wv_prox_v3", false);
+  preferences.putBool("act_high", sensorActiveHigh);
   preferences.end();
-
-  Serial.printf("[ULTRASONIC HC-SR04] Target Jarak Baru Disimpan ke NVS: <= %.1f cm (Lepas: > %.1f cm)\n",
-                targetDistanceCm, targetDistanceCm + HYSTERESIS_MARGIN_CM);
+  Serial.printf("[PROXIMITY CHE18-30NA-B710] Polaritas Baru Disimpan: %s\n",
+                sensorActiveHigh ? "Active HIGH (HIGH = Wadah Ada)" : "Active LOW (LOW = Wadah Ada - NPN NO)");
 }
 
 inline void saveProximityConfig(float distCm, bool activeHigh) {
-  saveUltrasonicTargetDistance(distCm);
+  targetDistanceCm = distCm;
+  saveProximityPolarity(activeHigh);
 }
 
-// Fungsi pengukuran jarak ultrasonik tunggal dengan timeout pendek (~15ms / max ~250cm) agar UI tidak freeze
-inline float readUltrasonicDistanceCm() {
-  // 1. Pastikan pin trigger bersih LOW
-  digitalWrite(PIN_ULTRASONIC_TRIG, LOW);
-  delayMicroseconds(2);
-
-  // 2. Berikan pulsa HIGH selama 10 mikrodetik
-  digitalWrite(PIN_ULTRASONIC_TRIG, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(PIN_ULTRASONIC_TRIG, LOW);
-
-  // 3. Baca durasi pantulan pulsa ECHO (timeout 15.000 us = 15 ms, ~250 cm max)
-  unsigned long durationUs = pulseIn(PIN_ULTRASONIC_ECHO, HIGH, 15000);
-
-  // Jika timeout atau tidak ada pantulan
-  if (durationUs == 0) {
-    return 999.0f; // Di luar jangkauan / pantulan meleset
-  }
-
-  // Jarak (cm) = (durasi mikrodetik * kecepatan suara 0.0343 cm/us) / 2
-  float dist = (float)durationUs * 0.0343f / 2.0f;
-  return dist;
-}
-
-// Pembacaan dengan Moving-Window Median Filter 5-Titik, Histeresis, & Debounce Asimetris
+// Pembacaan digital ultra-cepat dengan Debounce Filter Asimetris (Non-blocking & Zero CPU Overhead)
 inline bool checkTumblerPresent() {
-  const int WINDOW_SIZE = 5;
-  static float distanceHistory[WINDOW_SIZE] = {999.0f, 999.0f, 999.0f, 999.0f, 999.0f};
-  static int historyIndex = 0;
   static unsigned long lastCheckTime = 0;
   static unsigned long lastLogTime = 0;
   static int consecutivePresentCount = 0;
   static int consecutiveRemovedCount = 0;
+  static int lastLoggedPin = -1;
 
   unsigned long now = millis();
 
-  // Sampling setiap 40ms: responsif, hemat CPU, & tidak membebani bus SPI LCD
-  if (now - lastCheckTime < 40) {
+  // Sampling setiap 10ms (100 Hz) - Sangat cepat & responsif
+  if (now - lastCheckTime < 10) {
     return isTumblerPresent;
-  }
-
-  // Jika ada jeda waktu lama (> 400ms, misal baru masuk ke layar deteksi), pre-fill buffer dengan pembacaan segar
-  if (lastCheckTime == 0 || (now - lastCheckTime > 400)) {
-    float initialDist = readUltrasonicDistanceCm();
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-      distanceHistory[i] = initialDist;
-    }
-    historyIndex = 0;
-    consecutivePresentCount = 0;
-    consecutiveRemovedCount = 0;
   }
   lastCheckTime = now;
 
-  // 1. Ambil 1 sampel baru ke dalam circular buffer
-  float rawDist = readUltrasonicDistanceCm();
-  distanceHistory[historyIndex] = rawDist;
-  historyIndex = (historyIndex + 1) % WINDOW_SIZE;
+  // 1. Baca level logika pin digital sensor CHE18-30NA-B710
+  int rawPinState = digitalRead(PIN_PROXIMITY_SENSOR);
 
-  // 2. Hitung nilai Median dari 5 sampel (Menolak 1-2 sampel glitch 999.0 atau noise)
-  float sortedSamples[WINDOW_SIZE];
-  for (int i = 0; i < WINDOW_SIZE; i++) {
-    sortedSamples[i] = distanceHistory[i];
+  // 2. Evaluasi deteksi berdasarkan polaritas NPN
+  // Default NPN NO: Pin tertarik ke LOW saat botol memantulkan cahaya inframerah
+  bool rawDetected = sensorActiveHigh ? (rawPinState == HIGH) : (rawPinState == LOW);
+
+  // Log seketika saat level pin fisik berubah
+  if (rawPinState != lastLoggedPin) {
+    lastLoggedPin = rawPinState;
+    Serial.printf("[SENSOR CHE18-30NA-B710] Level Pin Fisik GPIO %d: %s -> Logika: %s\n",
+                  PIN_PROXIMITY_SENSOR,
+                  rawPinState == HIGH ? "HIGH (3.3V)" : "LOW (GND / 0V)",
+                  rawDetected ? "WADAH TERDETEKSI" : "KOSONG");
   }
 
-  // Bubble sort sederhana untuk 5 elemen
-  for (int i = 0; i < WINDOW_SIZE - 1; i++) {
-    for (int j = i + 1; j < WINDOW_SIZE; j++) {
-      if (sortedSamples[i] > sortedSamples[j]) {
-        float tmp = sortedSamples[i];
-        sortedSamples[i] = sortedSamples[j];
-        sortedSamples[j] = tmp;
-      }
-    }
-  }
-
-  // Nilai median bersih (posisi tengah: index 2 dari 5 elemen)
-  float medianDist = sortedSamples[WINDOW_SIZE / 2];
-  currentMeasuredDistanceCm = medianDist;
-
-  // 3. Logika Histeresis (Schmitt Trigger)
-  // - Jika status saat ini KOSONG: Butuh jarak <= targetDistanceCm untuk dianggap ADA
-  // - Jika status saat ini ADA: Wadah baru dianggap LEPAS jika jarak > (targetDistanceCm + HYSTERESIS_MARGIN_CM)
-  float releaseThreshold = targetDistanceCm + HYSTERESIS_MARGIN_CM;
-
-  bool rawStateDecision = isTumblerPresent;
-  if (!isTumblerPresent) {
-    // Menunggu wadah diletakkan
-    if (medianDist >= MIN_DETECT_DISTANCE_CM && medianDist <= targetDistanceCm) {
-      rawStateDecision = true;
-    }
-  } else {
-    // Wadah sedang terdeteksi: hanya lepas jika benar-benar melewati ambang histeresis
-    if (medianDist > releaseThreshold || medianDist < MIN_DETECT_DISTANCE_CM) {
-      rawStateDecision = false;
-    }
-  }
-
-  // 4. Debounce Asimetris:
-  // - Deteksi Wadah Diletakkan: Cepat (2 sampel berturut-turut = ~80ms)
-  // - Deteksi Wadah Terlepas: Stabil & Aman (4 sampel berturut-turut = ~160ms)
-  if (rawStateDecision) {
+  // 3. Debounce Asimetris Berkecepatan Tinggi:
+  // - Deteksi Wadah Diletakkan: 2 sampel konsisten (~20 ms respon super cepat)
+  // - Deteksi Wadah Terangkat: 3 sampel konsisten (~30 ms respon stabil)
+  if (rawDetected) {
     consecutivePresentCount++;
     consecutiveRemovedCount = 0;
 
     if (consecutivePresentCount >= 2 && !isTumblerPresent) {
       isTumblerPresent = true;
-      Serial.printf("[HC-SR04] Wadah TERDETEKSI STABIL pada jarak %.1f cm (Target: <= %.1f cm). Membunyikan bip konfirmasi...\n",
-                    medianDist, targetDistanceCm);
-      triggerBuzzerBeep(1, 100); // 1 Bip konfirmasi deteksi wadah
+      currentMeasuredDistanceCm = 5.0f; // Status terpasang stabil
+      Serial.printf("[CHE18-30NA-B710] Wadah TERDETEKSI CEPAT! Pin GPIO %d = %s. Memberikan bip konfirmasi...\n",
+                    PIN_PROXIMITY_SENSOR, rawPinState == HIGH ? "HIGH" : "LOW");
+      triggerBuzzerBeep(1, 80); // 1 Bip konfirmasi deteksi wadah
     }
   } else {
     consecutiveRemovedCount++;
     consecutivePresentCount = 0;
 
-    if (consecutiveRemovedCount >= 4 && isTumblerPresent) {
+    if (consecutiveRemovedCount >= 3 && isTumblerPresent) {
       isTumblerPresent = false;
-      Serial.printf("[HC-SR04] Wadah TERLEPAS STABIL! Jarak Terukur: %.1f cm (Ambang Lepas: > %.1f cm)\n",
-                    medianDist, releaseThreshold);
+      currentMeasuredDistanceCm = 999.0f; // Status wadah terlepas
+      Serial.printf("[CHE18-30NA-B710] Wadah TERLEPAS! Pin GPIO %d = %s\n",
+                    PIN_PROXIMITY_SENSOR, rawPinState == HIGH ? "HIGH" : "LOW");
     }
   }
 
-  // 5. Log Diagnostik Periodik (Setiap 1 Detik ke Serial Monitor)
-  if (now - lastLogTime >= 1000) {
+  // 4. Log Diagnostik Periodik (Setiap 2 Detik ke Serial Monitor)
+  if (now - lastLogTime >= 2000) {
     lastLogTime = now;
-    Serial.printf("[HC-SR04 DIAGNOSTIK] Jarak Live: %.1f cm | Median: %.1f cm | Ambang: <= %.1f cm (Lepas: > %.1f cm) | Status: %s\n",
-                  rawDist, medianDist, targetDistanceCm, releaseThreshold,
+    Serial.printf("[CHE18-30NA-B710 DIAGNOSTIK] Pin GPIO %d: %s | Logika: %s | Status: %s\n",
+                  PIN_PROXIMITY_SENSOR,
+                  rawPinState == HIGH ? "HIGH" : "LOW",
+                  sensorActiveHigh ? "Active HIGH" : "Active LOW (NPN NO)",
                   isTumblerPresent ? "WADAH TERDETEKSI [OK]" : "KOSONG");
   }
 
@@ -176,10 +119,12 @@ inline bool checkTumblerPresent() {
 }
 
 inline void resetProximitySensor() {
-  float dist = readUltrasonicDistanceCm();
-  currentMeasuredDistanceCm = dist;
-  isTumblerPresent = (dist >= MIN_DETECT_DISTANCE_CM && dist <= targetDistanceCm);
-  triggerBuzzerBeep(1, 150); // Bip konfirmasi reset
-  Serial.printf("[HC-SR04] Sensor di-reset! Jarak saat ini: %.1f cm -> Status: %s\n",
-                dist, isTumblerPresent ? "TERDETEKSI" : "KOSONG");
+  int rawPinState = digitalRead(PIN_PROXIMITY_SENSOR);
+  bool rawDetected = sensorActiveHigh ? (rawPinState == HIGH) : (rawPinState == LOW);
+  isTumblerPresent = rawDetected;
+  currentMeasuredDistanceCm = isTumblerPresent ? 5.0f : 999.0f;
+  triggerBuzzerBeep(1, 150);
+  Serial.printf("[CHE18-30NA-B710] Sensor di-reset! Pin GPIO %d: %s -> Status: %s\n",
+                PIN_PROXIMITY_SENSOR, rawPinState == HIGH ? "HIGH" : "LOW",
+                isTumblerPresent ? "TERDETEKSI" : "KOSONG");
 }

@@ -32,12 +32,13 @@
 const int PIN_RELAY_PUMP_CH1     = 32; // GPIO 32 (Pompa Air, Active LOW)
 const int PIN_TRIGGER_RESET_WIFI = 0;  // GPIO 0 (Tombol BOOT ESP32)
 
-// Pin Sensor Ultrasonik HC-SR04 & Buzzer (Sesuai Dokumen Hal. 3):
-const int PIN_ULTRASONIC_TRIG    = 16; // GPIO 16 (Pin Trig D16 sesuai Dokumen Hal. 3)
-const int PIN_ULTRASONIC_ECHO    = 17; // GPIO 17 (Pin Echo D17 sesuai Dokumen Hal. 3)
+// Pin Sensor Proximity Optik CHE18-30NA-B710 & Buzzer:
+const int PIN_PROXIMITY_SENSOR   = 16; // GPIO 16 (Sinyal Hitam CHE18-30NA-B710, NPN NO / Active LOW)
 const int PIN_BUZZER             = 27; // GPIO 27 (Wajib dipindah dari GPIO 15 agar TIDAK bentrok dengan MISO/T_DO Touch Screen!)
 
 #define RELAY_ACTIVE_STATE LOW
+extern uint8_t relayActiveState;
+extern bool isDirectProximityMode;
 
 // ==============================================================================
 // 2. KONFIGURASI RESOLUSI, ORIENTASI & KALIBRASI TOUCH
@@ -203,7 +204,7 @@ extern char activeOrderId[40];
 extern char activeNominalStr[16];
 extern char activeQrPayload[512];
 
-// Variabel Kontrol Sensor Ultrasonik HC-SR04 & Buzzer
+// Variabel Kontrol Sensor Proximity Optik CHE18-30NA-B710 & Buzzer
 extern bool isTumblerPresent;
 extern bool isBuzzerAlarmEnabled;
 extern bool isBuzzerSounding;

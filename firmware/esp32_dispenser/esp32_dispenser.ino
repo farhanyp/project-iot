@@ -93,13 +93,15 @@ bool initialPackagesLoaded            = false;
 int dispenserDryRunRetryCount         = 0;
 const int MAX_DRY_RUN_RETRIES         = 2;
 
-// Variabel Kontrol Sensor Ultrasonik HC-SR04 & Buzzer
+// Variabel Kontrol Sensor Proximity Optik CHE18-30NA-B710 & Buzzer
 bool isTumblerPresent                 = false;
 bool isBuzzerAlarmEnabled             = true;
 bool isBuzzerSounding                 = false;
-float targetDistanceCm                = 12.0f; // Jarak deteksi tumbler (misal <= 12 cm)
-float currentMeasuredDistanceCm       = 0.0f;  // Jarak live terukur oleh HC-SR04
-bool sensorActiveHigh                 = true;  // Kompatibilitas config
+float targetDistanceCm                = 15.0f; // Jarak acuan nominal
+float currentMeasuredDistanceCm       = 999.0f; // 5.0f jika terdeteksi, 999.0f jika kosong
+bool sensorActiveHigh                 = false; // Default NPN NO: Active LOW (LOW = Terdeteksi)
+uint8_t relayActiveState              = RELAY_ACTIVE_STATE; // Default LOW (Active LOW relay)
+bool isDirectProximityMode            = false; // true: Wadah ada = Pompa Nyala, Wadah jauh = Pompa Mati (Bebas bayar/Testing)
 
 // State Machine Buzzer Non-Blocking Bebas Konflik Antar-Core
 volatile unsigned long buzzerBeepUntil        = 0;
@@ -774,24 +776,35 @@ void handleSerialCommands() {
     valStr.trim();
     float newDist = valStr.toFloat();
     if (newDist >= 2.0f && newDist <= 50.0f) {
-      saveUltrasonicTargetDistance(newDist);
-      Serial.printf(">> [OK] Target jarak deteksi diperbarui: <= %.1f cm (Tersimpan ke NVS Flash)\n", targetDistanceCm);
+      saveProximityConfig(newDist, sensorActiveHigh);
+      Serial.printf(">> [OK] Target acuan deteksi diperbarui: <= %.1f cm (Tersimpan ke NVS Flash)\n", targetDistanceCm);
       beepOnce(80);
     } else {
       Serial.println(">> [ERROR] Nilai jarak tidak valid! Masukkan antara 2.0 s/d 50.0 cm (Contoh: DIST:12.0)");
     }
   }
-  // 2. Perintah DIST? (Cek Jarak Live)
-  else if (cmd.equalsIgnoreCase("DIST?") || cmd.equalsIgnoreCase("STATUS?")) {
-    float liveDist = readUltrasonicDistanceCm();
+  // 2. Perintah PROX? / STATUS? / DIST? (Cek Status Sensor Proximity Optik)
+  else if (cmd.equalsIgnoreCase("PROX?") || cmd.equalsIgnoreCase("STATUS?") || cmd.equalsIgnoreCase("DIST?")) {
+    int rawPin = digitalRead(PIN_PROXIMITY_SENSOR);
     Serial.println("==================================================");
-    Serial.printf(">> STATUS SENSOR ULTRASONIK HC-SR04:\n");
-    Serial.printf("   - Jarak Terukur Live  : %.1f cm\n", liveDist);
-    Serial.printf("   - Jarak Median Filter : %.1f cm\n", currentMeasuredDistanceCm);
-    Serial.printf("   - Target Jarak Acuan  : <= %.1f cm (Lepas: > %.1f cm)\n", targetDistanceCm, targetDistanceCm + HYSTERESIS_MARGIN_CM);
-    Serial.printf("   - Status Tumbler      : %s\n", isTumblerPresent ? "TERPASANG (OK)" : "TIDAK ADA / KOSONG");
+    Serial.println(">> STATUS SENSOR PROXIMITY OPTIK CHE18-30NA-B710:");
+    Serial.printf("   - Pin Hardware GPIO   : %d (INPUT_PULLUP)\n", PIN_PROXIMITY_SENSOR);
+    Serial.printf("   - Level Sinyal Fisik  : %s\n", rawPin == HIGH ? "HIGH (3.3V)" : "LOW (0V / GND)");
+    Serial.printf("   - Konfigurasi Logika  : %s\n", sensorActiveHigh ? "Active HIGH" : "Active LOW (NPN NO Default)");
+    Serial.printf("   - Status Tumbler      : %s\n", isTumblerPresent ? "TERPASANG [OK]" : "KOSONG / TIDAK TERDETEKSI");
     Serial.printf("   - Alarm Buzzer        : %s\n", isBuzzerAlarmEnabled ? "AKTIF (ON)" : "MATI (OFF)");
     Serial.println("==================================================");
+  }
+  // 3. Perintah POLARITY:LOW / POLARITY:HIGH
+  else if (cmd.equalsIgnoreCase("POLARITY:LOW") || cmd.equalsIgnoreCase("ACT:LOW")) {
+    saveProximityPolarity(false);
+    beepOnce(80);
+    Serial.println(">> [OK] Polaritas diset Active LOW (Default NPN Normally Open).");
+  }
+  else if (cmd.equalsIgnoreCase("POLARITY:HIGH") || cmd.equalsIgnoreCase("ACT:HIGH")) {
+    saveProximityPolarity(true);
+    beepOnce(80);
+    Serial.println(">> [OK] Polaritas diset Active HIGH.");
   }
   // 3. Perintah ALARM:1 / ALARM:0
   else if (cmd.equalsIgnoreCase("ALARM:1") || cmd.equalsIgnoreCase("ALARM:ON")) {
@@ -877,21 +890,73 @@ void handleSerialCommands() {
     Serial.println(">> [OK] Menghentikan melodi lagu buzzer.");
     stopBootSong();
   }
-  // 12. Bantuan Command
+  // 12. Perintah Uji Coba Manual Pompa Air (PUMP:ON / PUMP:OFF / PUMP:TEST)
+  else if (cmd.equalsIgnoreCase("PUMP:ON") || cmd.equalsIgnoreCase("POMPA:ON")) {
+    Serial.println(">> [MANUAL] Memaksa Pompa MENYALA (ON)...");
+    startPump();
+    beepOnce(60);
+  }
+  else if (cmd.equalsIgnoreCase("PUMP:OFF") || cmd.equalsIgnoreCase("POMPA:OFF")) {
+    Serial.println(">> [MANUAL] Memaksa Pompa MATI (OFF)...");
+    stopPump();
+    beepOnce(60);
+  }
+  else if (cmd.equalsIgnoreCase("PUMP:TEST") || cmd.equalsIgnoreCase("TEST:PUMP")) {
+    Serial.println(">> [TEST POMPA] Menyalakan pompa selama 3 detik...");
+    startPump();
+    beepOnce(80);
+    delay(3000);
+    stopPump();
+    Serial.println(">> [TEST POMPA] Selesai uji coba 3 detik. Pompa dimatikan.");
+    beepPattern(2);
+  }
+  // 13. Perintah Polaritas Relay (RELAY:LOW / RELAY:HIGH)
+  else if (cmd.equalsIgnoreCase("RELAY:LOW") || cmd.equalsIgnoreCase("RELAY:0")) {
+    relayActiveState = LOW;
+    stopPump();
+    Serial.println(">> [OK] Konfigurasi Relay diatur ke: ACTIVE LOW (0V)");
+    beepOnce(80);
+  }
+  else if (cmd.equalsIgnoreCase("RELAY:HIGH") || cmd.equalsIgnoreCase("RELAY:1")) {
+    relayActiveState = HIGH;
+    stopPump();
+    Serial.println(">> [OK] Konfigurasi Relay diatur ke: ACTIVE HIGH (3.3V)");
+    beepOnce(80);
+  }
+  // 14. Perintah Mode Operasi (MODE:DIRECT / MODE:KIOSK)
+  else if (cmd.equalsIgnoreCase("MODE:DIRECT") || cmd.equalsIgnoreCase("DIRECT:ON") || cmd.equalsIgnoreCase("AUTO:ON")) {
+    isDirectProximityMode = true;
+    Serial.println("==================================================");
+    Serial.println(">> [OK] MODE OTOMATIS LANGSUNG (DIRECT) AKTIF!");
+    Serial.println("   - Botol didekatkan ke sensor -> POMPA MENYALA");
+    Serial.println("   - Botol dijauhkan dari sensor -> POMPA MATI");
+    Serial.println("   - Jarak murni diatur dari sekrup di belakang sensor!");
+    Serial.println("==================================================");
+    beepPattern(3);
+  }
+  else if (cmd.equalsIgnoreCase("MODE:KIOSK") || cmd.equalsIgnoreCase("DIRECT:OFF") || cmd.equalsIgnoreCase("AUTO:OFF")) {
+    isDirectProximityMode = false;
+    stopPump();
+    Serial.println(">> [OK] MODE KIOSK BERBAYAR AKTIF (Alur Normal QRIS)");
+    beepOnce(100);
+  }
+  // 15. Bantuan Command
   else if (cmd.equalsIgnoreCase("HELP") || cmd.equalsIgnoreCase("?")) {
     Serial.println(">> PERINTAH SERIAL TERSEDIA:");
-    Serial.println("   - SONG        : Uji coba pemutaran lagu buzzer (Take on Me)");
-    Serial.println("   - SONG:STOP   : Hentikan pemutaran lagu buzzer");
-    Serial.println("   - FLOW:<rate> : Atur debit pompa dinamis (Contoh: FLOW:25.0 atau FLOW:30.0)");
-    Serial.println("   - FLOW?       : Cek debit saat ini & tabel simulasi waktu pengisian");
-    Serial.println("   - WIFI:RESET  : Hapus Wi-Fi tersimpan & buka hotspot WaterVend-Setup");
-    Serial.println("   - DIST:<cm>   : Atur target jarak dinamis (Contoh: DIST:12.0)");
-    Serial.println("   - DIST?       : Cek jarak live saat ini & status tumbler");
-    Serial.println("   - ALARM:1 / 0 : Aktifkan (1) atau Matikan (0) bunyi alarm buzzer");
-    Serial.println("   - BEEP        : Uji coba bunyi buzzer");
-    Serial.println("   - TOUCH:RESET : Hapus kalibrasi NVS dan kembalikan ke profil hardware");
-    Serial.println("   - TOUCH:CAL   : Mulai kalibrasi sentuh interaktif (tanda silang di layar)");
-    Serial.println("   - TOUCH?      : Cek nilai kalibrasi XPT2046 saat ini");
+    Serial.println("   - MODE:DIRECT   : Aktifkan mode otomatis bebas bayar (Botol ada = Pompa ON, Botol jauh = Pompa OFF)");
+    Serial.println("   - MODE:KIOSK    : Kembalikan ke mode kiosk berbayar (Alur QRIS)");
+    Serial.println("   - PUMP:TEST     : Uji coba pompa menyala 3 detik");
+    Serial.println("   - PUMP:ON/OFF   : Nyalakan / Matikan pompa manual");
+    Serial.println("   - PROX?         : Cek level pin & status sensor optik CHE18-30NA-B710");
+    Serial.println("   - POLARITY:LOW  : Set logika deteksi Active LOW (Default NPN Normally Open)");
+    Serial.println("   - POLARITY:HIGH : Set logika deteksi Active HIGH");
+    Serial.println("   - RELAY:LOW     : Set relay Active LOW (0V)");
+    Serial.println("   - RELAY:HIGH    : Set relay Active HIGH (3.3V)");
+    Serial.println("   - SONG          : Uji coba pemutaran lagu buzzer (Take on Me)");
+    Serial.println("   - FLOW:<rate>   : Atur debit pompa dinamis (Contoh: FLOW:25.0)");
+    Serial.println("   - FLOW?         : Cek debit saat ini & tabel simulasi waktu");
+    Serial.println("   - WIFI:RESET    : Hapus Wi-Fi tersimpan & buka hotspot");
+    Serial.println("   - BEEP          : Uji coba bunyi buzzer");
   }
 }
 
@@ -902,19 +967,60 @@ void loop() {
   // 1. Baca Perintah Serial Monitor (Offline Dynamic Distance Config & Kalibrasi)
   handleSerialCommands();
 
-  // 2. Baca Sensor Ultrasonik HC-SR04 pada SCREEN_PLACE_TUMBLER, SCREEN_DISPENSING, SCREEN_COMPLETE, atau SCREEN_FAILED
-  if (currentScreen == SCREEN_PLACE_TUMBLER || currentScreen == SCREEN_DISPENSING || 
+  // 2. Baca Sensor Proximity Optik CHE18-30NA-B710
+  if (isDirectProximityMode || currentScreen == SCREEN_PLACE_TUMBLER || currentScreen == SCREEN_DISPENSING || 
       currentScreen == SCREEN_COMPLETE || currentScreen == SCREEN_FAILED) {
     isTumblerPresent = checkTumblerPresent();
   } else {
-    isTumblerPresent = false; // Sensor hibernasi pada Standby, QRIS, Boot
+    isTumblerPresent = false;
   }
   // 3. Update State Machine Buzzer (Selalu dipanggil di setiap loop di Core 1 agar antrean bip mati tepat waktu)
   updateBuzzer();
 
-  // Perbarui UI Wadah
+  // A. LOGIKA MODE LANGSUNG OTOMATIS (DIRECT AUTO PROXIMITY MODE)
+  // Wadah terdeteksi = Pompa Nyala, Wadah dijauhkan = Pompa Mati (Bebas bayar / Testing)
+  if (isDirectProximityMode) {
+    static bool s_directPumpActive = false;
+    if (isTumblerPresent && !s_directPumpActive) {
+      s_directPumpActive = true;
+      startPump();
+      Serial.println("[DIRECT MODE] Wadah terdeteksi -> POMPA NYALA (ON)");
+    } else if (!isTumblerPresent && s_directPumpActive) {
+      s_directPumpActive = false;
+      stopPump();
+      Serial.println("[DIRECT MODE] Wadah dijauhkan -> POMPA MATI (OFF)");
+    }
+    return; // Langsung selesai untuk iterasi loop ini di mode langsung
+  }
+
+  // B. LOGIKA AUTO-START DI LAYAR LETAKKAN WADAH (SCREEN_PLACE_TUMBLER)
+  // Begitu wadah terdeteksi di tatakan, pompa OTOMATIS MENYALA tanpa harus sentuh layar!
   if (currentScreen == SCREEN_PLACE_TUMBLER) {
     updatePlaceTumblerUI(isTumblerPresent, currentMeasuredDistanceCm);
+    if (isTumblerPresent && !isDispensing) {
+      static unsigned long s_autoStartTimer = 0;
+      if (s_autoStartTimer == 0) s_autoStartTimer = millis();
+      if (millis() - s_autoStartTimer >= 200) { // Stabil 200ms
+        s_autoStartTimer = 0;
+        Serial.println("[AUTO-START] Wadah terdeteksi di tatakan! Pompa OTOMATIS MENYALA...");
+        beepOnce(80);
+        requiredDispenseDurationMs = calculateDispenseDurationMs(targetMilliLitres);
+        dispensedMilliLitres = 0;
+        totalAccumulatedMl = 0;
+        isSwitchingBottle = false;
+        activePumpDurationMs = 0;
+        lastPumpIterationMillis = millis();
+        dispenseStartTime = millis();
+        isDispensing = true;
+        isDispensePaused = false;
+        startPump();
+        showDispensingScreen(targetMilliLitres);
+        return;
+      }
+    } else {
+      static unsigned long s_autoStartTimer = 0;
+      s_autoStartTimer = 0;
+    }
   }
   else if (currentScreen == SCREEN_DISPENSING && isSwitchingBottle) {
     updateSwitchBottleUI(isTumblerPresent);

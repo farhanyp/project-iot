@@ -1,13 +1,26 @@
-version: '3.8'
-
 services:
-  # 1. Eclipse Mosquitto MQTT Broker (untuk komunikasi ESP32)
+  postgres:
+    image: postgres:16-alpine
+    container_name: watervend-postgres-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: air_minum_db
+    ports:
+      - '5433:5432'
+    volumes:
+      - postgres_data_local:/var/lib/postgresql/data
+    networks:
+      - watervend-local-network
+
+  # 2. Eclipse Mosquitto MQTT Broker (untuk komunikasi ESP32)
   mosquitto:
     image: eclipse-mosquitto:2.0
     container_name: watervend-mosquitto-broker
     restart: always
     ports:
-      # Port 1883 langsung di-expose ke publik VPS untuk ESP32 fisik
+      # Port 1883 langsung di-expose ke publik VPS / ESP32 fisik
       - '1883:1883'
       - '9001:9001'
     volumes:
@@ -19,8 +32,9 @@ services:
     networks:
       - watervend-local-network
 
-  # 2. IoT Gateway / Bridge Service (MQTT <-> WebSocket & DB Sync)
+  # 3. IoT Gateway / Bridge Service (Opsional jika ingin di-container: docker compose --profile full up -d)
   bridge:
+    profiles: [ "full" ]
     build:
       context: .
       dockerfile: Dockerfile.bridge
@@ -30,8 +44,7 @@ services:
       - NODE_ENV=production
       - WS_PORT=3002
       - MQTT_BROKER_URL=${MQTT_BROKER_URL:-mqtt://mosquitto:1883}
-      # Menggunakan DATABASE_URL dari external environment (misal mengarah ke global-postgres-db)
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/air_minum_db?schema=public}
       - MIDTRANS_SERVER_KEY=${MIDTRANS_SERVER_KEY}
       - MIDTRANS_CLIENT_KEY=${MIDTRANS_CLIENT_KEY}
       - MIDTRANS_MERCHANT_ID=${MIDTRANS_MERCHANT_ID}
@@ -42,11 +55,13 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - mosquitto
+      - postgres
     networks:
       - watervend-local-network
 
-  # 3. Next.js Web App
+  # 4. Next.js Web App (Opsional jika ingin di-container: docker compose --profile full up -d)
   web:
+    profiles: [ "full" ]
     build:
       context: .
       dockerfile: Dockerfile
@@ -57,7 +72,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/air_minum_db?schema=public}
       - MQTT_BROKER_URL=${MQTT_BROKER_URL:-mqtt://mosquitto:1883}
       - NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
       - MIDTRANS_SERVER_KEY=${MIDTRANS_SERVER_KEY}
@@ -71,10 +86,12 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - bridge
+      - postgres
     networks:
       - watervend-local-network
 
 volumes:
+  postgres_data_local:
   mosquitto_data_local:
   mosquitto_log_local:
 
