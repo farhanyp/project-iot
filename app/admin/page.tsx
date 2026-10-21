@@ -1,17 +1,16 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import Link from "next/link";
 import { useIoTSocket } from "@/lib/use-iot-socket";
 import MetricCards, { StatsData } from "@/components/admin/dashboard/metric-cards";
+import GallonEstimatorCard from "@/components/admin/dashboard/gallon-estimator-card";
 import FlowRateEngine from "@/components/admin/dashboard/flow-rate-engine";
-import RecentTransactionsTable, { TransactionItem } from "@/components/admin/dashboard/recent-transactions-table";
 
 export default function AdminDashboardPage() {
   const [stats, setStats] = useState<StatsData | null>(null);
-  const [transactions, setTransactions] = useState<TransactionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [simulatingId, setSimulatingId] = useState<string | null>(null);
 
   // Hook IoT WebSocket untuk Kontrol Debit & Kalibrasi Real-time
   const {
@@ -37,27 +36,6 @@ export default function AdminDashboardPage() {
     }
   }, [telemetry.flowRateMlPerSec]);
 
-  const handleSimulatePay = async (orderId: string) => {
-    setSimulatingId(orderId);
-    try {
-      const res = await fetch("/api/payment/simulate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        fetchStats();
-      } else {
-        alert(data.error || "Gagal simulasi pembayaran.");
-      }
-    } catch {
-      alert("Terjadi error koneksi saat simulasi.");
-    } finally {
-      setSimulatingId(null);
-    }
-  };
-
   const fetchStats = useCallback(async () => {
     try {
       setRefreshing(true);
@@ -65,7 +43,6 @@ export default function AdminDashboardPage() {
       if (res.ok) {
         const data = await res.json();
         setStats(data.stats);
-        setTransactions(data.recentTransactions || []);
       }
     } catch (e) {
       console.error("Failed to load stats:", e);
@@ -83,7 +60,6 @@ export default function AdminDashboardPage() {
         .then((data) => {
           if (isMounted && data?.stats) {
             setStats(data.stats);
-            setTransactions(data.recentTransactions || []);
             setLoading(false);
           }
         })
@@ -145,23 +121,48 @@ export default function AdminDashboardPage() {
       {/* Page Title & Refresh */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">Ringkasan Operasional</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">Dashboard Operasional</h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5 leading-relaxed">
-            Pemantauan pendapatan dan aktivitas transaksi otomatis
+            Rangkuman transaksi, pendapatan, pemantauan volume galon air, dan kalibrasi pompa
           </p>
         </div>
         <button
           type="button"
           onClick={fetchStats}
-          disabled={refreshing}
+          disabled={refreshing || loading}
           className="self-start sm:self-auto px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 active:bg-slate-100 rounded-lg text-xs font-semibold text-slate-700 shadow-xs cursor-pointer disabled:opacity-50"
         >
           {refreshing ? "Memperbarui..." : "Segarkan Data"}
         </button>
       </div>
 
-      {/* Cards Metrik Omset & Volume */}
+      {/* Cards Metrik Omset & Kuantitas Transaksi (Hari ini, Minggu ini, Dari awal) */}
       <MetricCards stats={stats} />
+
+      {/* Kartu Estimasi Sisa Air Galon (19 Liter) & Tombol Pasang Galon Baru */}
+      <GallonEstimatorCard
+        gallon={stats?.gallon}
+        onResetSuccess={fetchStats}
+      />
+
+      {/* Navigasi Cepat ke Halaman Daftar Transaksi */}
+      <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200/80 rounded-xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+        <div className="space-y-1">
+          <h3 className="text-sm sm:text-base font-bold text-slate-900">
+            Daftar Riwayat Transaksi Lengkap
+          </h3>
+          <p className="text-xs text-slate-600">
+            Terdapat total <span className="font-semibold text-slate-900">{stats?.totalTransactions || 0}</span> transaksi tercatat. Buka halaman khusus transaksi untuk mencari invoice, menyaring status, atau simulasi pembayaran.
+          </p>
+        </div>
+        <Link
+          href="/admin/transactions"
+          className="inline-flex items-center justify-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors whitespace-nowrap self-start sm:self-auto"
+        >
+          <span>Lihat Semua Transaksi</span>
+          <span>→</span>
+        </Link>
+      </div>
 
       {/* Kartu Pengaturan & Simulator Debit Pompa Dinamis */}
       <FlowRateEngine
@@ -179,14 +180,6 @@ export default function AdminDashboardPage() {
         onApplyCupCalibration={handleApplyCupCalibration}
         showCupCalibrator={showCupCalibrator}
         setShowCupCalibrator={setShowCupCalibrator}
-      />
-
-      {/* Tabel Transaksi Terbaru */}
-      <RecentTransactionsTable
-        transactions={transactions}
-        loading={loading}
-        onSimulatePay={handleSimulatePay}
-        simulatingId={simulatingId}
       />
     </div>
   );

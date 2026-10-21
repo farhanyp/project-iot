@@ -11,6 +11,7 @@ export interface NavLinkItem {
 
 export const DEFAULT_ADMIN_NAV_LINKS: NavLinkItem[] = [
   { label: "Dashboard", href: "/admin" },
+  { label: "Transaksi", href: "/admin/transactions" },
   { label: "Manajemen Perangkat", href: "/admin/devices" },
   { label: "Paket Menu Air", href: "/admin/packages" },
   { label: "Uji Sensor & Buzzer", href: "/admin/sensor-test" },
