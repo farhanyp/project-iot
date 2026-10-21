@@ -39,7 +39,6 @@ const int PIN_BUZZER             = 27; // GPIO 27 (Wajib dipindah dari GPIO 15 a
 #define RELAY_ACTIVE_STATE LOW
 extern uint8_t relayActiveState;
 extern bool isDirectProximityMode;
-extern int proximityDebounceSamples;
 
 // ==============================================================================
 // 2. KONFIGURASI RESOLUSI, ORIENTASI & KALIBRASI TOUCH

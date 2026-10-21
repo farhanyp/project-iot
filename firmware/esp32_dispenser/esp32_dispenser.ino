@@ -102,7 +102,6 @@ float currentMeasuredDistanceCm       = 999.0f; // 5.0f jika terdeteksi, 999.0f 
 bool sensorActiveHigh                 = false; // Default NPN NO: Active LOW (LOW = Terdeteksi)
 uint8_t relayActiveState              = RELAY_ACTIVE_STATE; // Default LOW (Active LOW relay)
 bool isDirectProximityMode            = false; // true: Wadah ada = Pompa Nyala, Wadah jauh = Pompa Mati (Bebas bayar/Testing)
-int proximityDebounceSamples          = 1;     // Default 1 sampel murni (direct true/false instan)
 
 // State Machine Buzzer Non-Blocking Bebas Konflik Antar-Core
 volatile unsigned long buzzerBeepUntil        = 0;
@@ -792,29 +791,9 @@ void handleSerialCommands() {
     Serial.printf("   - Pin Hardware GPIO   : %d (INPUT_PULLUP)\n", PIN_PROXIMITY_SENSOR);
     Serial.printf("   - Level Sinyal Fisik  : %s\n", rawPin == HIGH ? "HIGH (3.3V)" : "LOW (0V / GND)");
     Serial.printf("   - Konfigurasi Logika  : %s\n", sensorActiveHigh ? "Active HIGH" : "Active LOW (NPN NO Default)");
-    Serial.printf("   - Filter Sampel       : %d sampel %s\n", proximityDebounceSamples, proximityDebounceSamples <= 1 ? "(1-SAMPEL INSTAN)" : "");
     Serial.printf("   - Status Tumbler      : %s\n", isTumblerPresent ? "TERPASANG [OK]" : "KOSONG / TIDAK TERDETEKSI");
     Serial.printf("   - Alarm Buzzer        : %s\n", isBuzzerAlarmEnabled ? "AKTIF (ON)" : "MATI (OFF)");
     Serial.println("==================================================");
-  }
-  // 3. Perintah SAMPLE:<angka> (Contoh: SAMPLE:1 untuk 1 sampel murni instan, SAMPLE:3, dsb)
-  else if (cmd.startsWith("SAMPLE:") || cmd.startsWith("sample:")) {
-    int s = cmd.substring(7).toInt();
-    if (s >= 1 && s <= 50) {
-      proximityDebounceSamples = s;
-      preferences.begin("wv_prox_v3", false);
-      preferences.putInt("deb_samples", proximityDebounceSamples);
-      preferences.end();
-      Serial.printf(">> [OK] Debounce Sensor CHE18 diatur ke: %d sampel\n", proximityDebounceSamples);
-      if (s == 1) {
-        Serial.println("   -> MODE 1-SAMPEL MURNI AKTIF (Direct 0/1, respon seketika tanpa delay)!");
-      } else {
-        Serial.printf("   -> Filter %d sampel (~%d ms) aktif untuk menyaring riak air.\n", s, s * 10);
-      }
-      beepOnce(80);
-    } else {
-      Serial.println(">> [ERROR] Nilai sampel tidak valid! Masukkan antara 1 s/d 50 (Contoh: SAMPLE:1)");
-    }
   }
   // 3. Perintah POLARITY:LOW / POLARITY:HIGH
   else if (cmd.equalsIgnoreCase("POLARITY:LOW") || cmd.equalsIgnoreCase("ACT:LOW")) {
@@ -999,7 +978,7 @@ void loop() {
   updateBuzzer();
 
   // A. LOGIKA MODE LANGSUNG OTOMATIS (DIRECT AUTO PROXIMITY MODE)
-  // Wadah terdeteksi = Pompa Nyala, Wadah dijauhkan = Pompa Mati (Instan tanpa delay tambahan)
+  // Wadah terdeteksi = Pompa Nyala, Wadah dijauhkan = Pompa Mati (Bebas bayar / Testing)
   if (isDirectProximityMode) {
     static bool s_directPumpActive = false;
     if (isTumblerPresent && !s_directPumpActive) {
@@ -1009,7 +988,7 @@ void loop() {
     } else if (!isTumblerPresent && s_directPumpActive) {
       s_directPumpActive = false;
       stopPump();
-      Serial.println("[DIRECT MODE] Wadah dijauhkan -> POMPA MATI SEKETIKA (OFF)");
+      Serial.println("[DIRECT MODE] Wadah dijauhkan -> POMPA MATI (OFF)");
     }
     return; // Langsung selesai untuk iterasi loop ini di mode langsung
   }
@@ -1102,54 +1081,52 @@ void loop() {
       return; // Tunggu pelanggan mengonfirmasi botol baru
     }
 
-    // PROTEKSI SENSOR WADAH: SMART PAUSE & RESUME
+    // PROTEKSI SENSOR WADAH: SMART PAUSE & RESUME (Sensor Ultrasonik)
     bool isTumblerRemoved = !isTumblerPresent;
 
     if (isTumblerRemoved) {
-      // Wadah terdeteksi diangkat / ditarik!
+      // WADAH TERLEPAS / DITARIK!
       if (!isDispensePaused) {
         isDispensePaused = true;
         stopPump();
         pauseStartTime = currentMillis;
         beepPattern(2); // Peringatan 2 bip wadah terlepas
-        Serial.printf("[SAFETY PAUSE] Wadah terlepas saat dispensing! Pompa DIMATIKAN seketika. Terisi: %lu/%lu mL\n",
+        Serial.printf("[SAFETY PAUSE] Wadah terlepas saat dispensing! Pompa DIMATIKAN sementara. Terisi: %lu/%lu mL\n",
                       dispensedMilliLitres, targetMilliLitres);
       }
 
-      if (isDispensePaused) {
-        // Peringatan Audio 15 detik terakhir sebelum timeout jeda habis (45..60 detik): Bip tiap 3 dtk
-        unsigned long elapsedPause = currentMillis - pauseStartTime;
-        if (elapsedPause >= 45000 && elapsedPause < 60000) {
-          static unsigned long s_lastPauseWarnTime = 0;
-          if (currentMillis - s_lastPauseWarnTime >= 3000) {
-            s_lastPauseWarnTime = currentMillis;
-            beepOnce(70);
-          }
+      // Peringatan Audio 15 detik terakhir sebelum timeout jeda habis (45..60 detik): Bip tiap 3 dtk
+      unsigned long elapsedPause = currentMillis - pauseStartTime;
+      if (elapsedPause >= 45000 && elapsedPause < 60000) {
+        static unsigned long s_lastPauseWarnTime = 0;
+        if (currentMillis - s_lastPauseWarnTime >= 3000) {
+          s_lastPauseWarnTime = currentMillis;
+          beepOnce(70);
         }
-
-        // Evaluasi Batas Waktu Jeda (Abandoned Pause Timeout 60 Detik)
-        if (currentMillis - pauseStartTime >= 60000) {
-          Serial.println("[TIMEOUT PAUSE] Wadah tidak ditaruh kembali selama 60 detik. Menyelesaikan otomatis...");
-          isDispensing = false;
-          isDispensePaused = false;
-          stopPump();
-          showCompleteScreen("COMPLETED", dispensedMilliLitres, "Waktu Jeda Habis (Auto Selesai)");
-
-          UIToNetMessage uiMsg;
-          memset(&uiMsg, 0, sizeof(uiMsg));
-          uiMsg.type = UI_MSG_COMPLETE;
-          uiMsg.dispensedMl = dispensedMilliLitres;
-          strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
-          strncpy(uiMsg.statusStr, "COMPLETED", sizeof(uiMsg.statusStr) - 1);
-
-          if (qUIToNet != NULL) {
-            xQueueSend(qUIToNet, &uiMsg, 0);
-          }
-          return;
-        }
-
-        lastPumpIterationMillis = currentMillis;
       }
+
+      // Evaluasi Batas Waktu Jeda (Abandoned Pause Timeout 60 Detik)
+      if (currentMillis - pauseStartTime >= 60000) {
+        Serial.println("[TIMEOUT PAUSE] Wadah tidak ditaruh kembali selama 60 detik. Menyelesaikan otomatis...");
+        isDispensing = false;
+        isDispensePaused = false;
+        stopPump();
+        showCompleteScreen("COMPLETED", dispensedMilliLitres, "Waktu Jeda Habis (Auto Selesai)");
+
+        UIToNetMessage uiMsg;
+        memset(&uiMsg, 0, sizeof(uiMsg));
+        uiMsg.type = UI_MSG_COMPLETE;
+        uiMsg.dispensedMl = dispensedMilliLitres;
+        strncpy(uiMsg.orderId, currentTransactionId.c_str(), sizeof(uiMsg.orderId) - 1);
+        strncpy(uiMsg.statusStr, "COMPLETED", sizeof(uiMsg.statusStr) - 1);
+
+        if (qUIToNet != NULL) {
+          xQueueSend(qUIToNet, &uiMsg, 0);
+        }
+        return;
+      }
+
+      lastPumpIterationMillis = currentMillis;
     } else {
       // WADAH TERPASANG KEMBALI!
       if (isDispensePaused) {
@@ -1160,10 +1137,8 @@ void loop() {
         Serial.printf("[SAFETY RESUME] Wadah terpasang kembali! Pompa DINYALAKAN kembali. Melanjutkan dari %lu mL...\n",
                       dispensedMilliLitres);
       }
-    }
 
-    // Akumulasikan volume air saat pompa aktif berputar
-    if (!isDispensePaused) {
+      // Akumulasikan waktu aktif pompa berputar
       unsigned long deltaMs = (currentMillis >= lastPumpIterationMillis) ? (currentMillis - lastPumpIterationMillis) : 0;
       activePumpDurationMs += deltaMs;
       lastPumpIterationMillis = currentMillis;
