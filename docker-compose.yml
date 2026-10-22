@@ -17,7 +17,6 @@ services:
       - global-vps-network
 
   bridge:
-    profiles: ["full"]
     build:
       context: .
       dockerfile: Dockerfile.bridge
@@ -43,7 +42,6 @@ services:
       - global-vps-network
 
   web:
-    profiles: ["full"]
     build:
       context: .
       dockerfile: Dockerfile
