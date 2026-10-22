@@ -1,28 +1,11 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: watervend-postgres-db
-    restart: always
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: air_minum_db
-    ports:
-      - '5433:5432'
-    volumes:
-      - postgres_data_local:/var/lib/postgresql/data
-    networks:
-      - watervend-local-network
-
-  # 2. Eclipse Mosquitto MQTT Broker (untuk komunikasi ESP32)
   mosquitto:
     image: eclipse-mosquitto:2.0
     container_name: watervend-mosquitto-broker
     restart: always
     ports:
-      # Port 1883 langsung di-expose ke publik VPS / ESP32 fisik
-      - '1883:1883'
-      - '9001:9001'
+      - "1883:1883"
+      - "9001:9001"
     volumes:
       - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mosquitto_data_local:/mosquitto/data
@@ -31,10 +14,10 @@ services:
       - "host.docker.internal:host-gateway"
     networks:
       - watervend-local-network
+      - global-vps-network
 
-  # 3. IoT Gateway / Bridge Service (Opsional jika ingin di-container: docker compose --profile full up -d)
   bridge:
-    profiles: [ "full" ]
+    profiles: ["full"]
     build:
       context: .
       dockerfile: Dockerfile.bridge
@@ -50,18 +33,17 @@ services:
       - MIDTRANS_MERCHANT_ID=${MIDTRANS_MERCHANT_ID}
       - MIDTRANS_IS_PRODUCTION=${MIDTRANS_IS_PRODUCTION:-false}
     ports:
-      - '3002:3002'
+      - "3002:3002"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - mosquitto
-      - postgres
     networks:
       - watervend-local-network
+      - global-vps-network
 
-  # 4. Next.js Web App (Opsional jika ingin di-container: docker compose --profile full up -d)
   web:
-    profiles: [ "full" ]
+    profiles: ["full"]
     build:
       context: .
       dockerfile: Dockerfile
@@ -81,20 +63,21 @@ services:
       - MIDTRANS_IS_PRODUCTION=${MIDTRANS_IS_PRODUCTION:-false}
       - AUTH_SECRET=${AUTH_SECRET:-watervend-super-secret-key-2026}
     ports:
-      - '3001:3001'
+      - "3001:3001"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - bridge
-      - postgres
     networks:
       - watervend-local-network
+      - global-vps-network
 
 volumes:
-  postgres_data_local:
   mosquitto_data_local:
   mosquitto_log_local:
 
 networks:
   watervend-local-network:
     driver: bridge
+  global-vps-network:
+    external: true
