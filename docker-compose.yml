@@ -40,6 +40,7 @@ services:
     networks:
       - watervend-local-network
       - global-vps-network
+      - dokploy-network
 
   web:
     build:
@@ -69,6 +70,7 @@ services:
     networks:
       - watervend-local-network
       - global-vps-network
+      - dokploy-network
 
 volumes:
   mosquitto_data_local:
@@ -78,4 +80,6 @@ networks:
   watervend-local-network:
     driver: bridge
   global-vps-network:
+    external: true
+  dokploy-network:
     external: true
